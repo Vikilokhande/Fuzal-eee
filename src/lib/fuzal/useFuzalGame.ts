@@ -1,0 +1,380 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FuzalSocket, type ConnectionState } from "./realtime";
+import { pieceUrl, postAction } from "./api";
+import { EventType, type GameEvent, type GameState } from "@/lib/game/types";
+import { swapPieces, correctSlots as computeCorrect } from "@/lib/game/puzzle";
+
+export interface PlayerView {
+  id: string;
+  name: string;
+  connected: boolean;
+  score: number;
+  slot: number;
+}
+export interface ProgressView extends PlayerView {
+  moves: number;
+  correctCount: number;
+  completed: boolean;
+  durationMs?: number | null;
+}
+export interface ResultView {
+  winner: PlayerView | null;
+  finishedAt: number | null;
+  durationMs: number | null;
+  image: { id: string; url: string; name: string } | null;
+  standings: ProgressView[];
+}
+export interface ClientState {
+  code: string;
+  lobbyId: string;
+  status: GameState;
+  maxPlayers: number;
+  gridCols: number;
+  gridRows: number;
+  serverNow: number;
+  players: PlayerView[];
+  you: { id: string; name: string; score: number } | null;
+  isHost: boolean;
+  memory: { startedAt: number; endsAt: number; durationSeconds: number } | null;
+  image: { id: string; url: string; name: string } | null;
+  imageName: string | null;
+  puzzle: {
+    board: number[];
+    moves: number;
+    startedAt: number;
+    correctSlots: boolean[];
+  } | null;
+  puzzleStartedAt: number | null;
+  puzzleProgress: ProgressView[] | null;
+  result: ResultView | null;
+}
+
+interface UseOpts {
+  code: string;
+  kind: "host" | "player";
+  hostToken?: string;
+  playerId?: string;
+  playerToken?: string;
+}
+
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+export function useFuzalGame(opts: UseOpts) {
+  const [state, setState] = useState<ClientState | null>(null);
+  const [connState, setConnState] = useState<ConnectionState>("connecting");
+  const [toast, setToast] = useState<string | null>(null);
+  const [goFlash, setGoFlash] = useState(false);
+  const clockOffset = useRef(0);
+  const socketRef = useRef<FuzalSocket | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  const applyEvent = useCallback((event: GameEvent) => {
+    clockOffset.current = event.at - Date.now();
+    const p = (event.payload ?? {}) as Record<string, unknown>;
+
+    setState((prev) => {
+      if (event.type === EventType.SNAPSHOT) {
+        return p as unknown as ClientState;
+      }
+      if (!prev) return prev;
+      const next: ClientState = { ...prev };
+
+      switch (event.type) {
+        case EventType.LOBBY_UPDATED: {
+          if (Array.isArray(p.players)) next.players = p.players as PlayerView[];
+          if (typeof p.status === "string") next.status = p.status as GameState;
+          break;
+        }
+        case EventType.PLAYER_JOINED: {
+          const pl = p.player as PlayerView;
+          if (pl && !next.players.some((x) => x.id === pl.id)) {
+            next.players = [...next.players, pl].sort((a, b) => a.slot - b.slot);
+          }
+          break;
+        }
+        case EventType.PLAYER_LEFT: {
+          next.players = next.players.filter((x) => x.id !== p.playerId);
+          break;
+        }
+        case EventType.PLAYER_STATUS: {
+          const connected = Boolean(p.connected);
+          next.players = next.players.map((x) =>
+            x.id === p.playerId ? { ...x, connected } : x,
+          );
+          break;
+        }
+        case EventType.GAME_STARTED: {
+          next.status = "MEMORY";
+          next.result = null;
+          break;
+        }
+        case EventType.MEMORY_PHASE_STARTED: {
+          next.status = "MEMORY";
+          next.result = null;
+          next.puzzle = null;
+          next.puzzleProgress = null;
+          next.puzzleStartedAt = null;
+          next.memory = {
+            startedAt: p.startedAt as number,
+            endsAt: p.endsAt as number,
+            durationSeconds: p.durationSeconds as number,
+          };
+          if (p.image) next.image = p.image as ClientState["image"];
+          if (typeof p.imageName === "string") next.imageName = p.imageName;
+          break;
+        }
+        case EventType.MEMORY_TIMER_UPDATED: {
+          if (next.memory && typeof p.endsAt === "number") {
+            next.memory = { ...next.memory, endsAt: p.endsAt };
+          }
+          break;
+        }
+        case EventType.PUZZLE_STARTED: {
+          next.status = "PUZZLE";
+          next.memory = null;
+          next.puzzleStartedAt = (p.startedAt as number) ?? Date.now();
+          if (Array.isArray(p.players)) {
+            next.puzzleProgress = p.players as ProgressView[];
+          }
+          if (Array.isArray(p.board)) {
+            next.puzzle = {
+              board: p.board as number[],
+              moves: (p.moves as number) ?? 0,
+              startedAt: next.puzzleStartedAt,
+              correctSlots: computeCorrect(p.board as number[]),
+            };
+            setGoFlash(true);
+            setTimeout(() => setGoFlash(false), 950);
+          }
+          break;
+        }
+        case EventType.PUZZLE_MOVE: {
+          if (Array.isArray(p.board)) {
+            const board = p.board as number[];
+            next.puzzle = {
+              board,
+              moves: (p.moves as number) ?? next.puzzle?.moves ?? 0,
+              startedAt: next.puzzle?.startedAt ?? Date.now(),
+              correctSlots: computeCorrect(board),
+            };
+          }
+          if (typeof p.playerId === "string" && Array.isArray(next.puzzleProgress)) {
+            next.puzzleProgress = next.puzzleProgress.map((pr) =>
+              pr.id === p.playerId
+                ? {
+                    ...pr,
+                    moves: (p.moves as number) ?? pr.moves,
+                    correctCount: (p.correctCount as number) ?? pr.correctCount,
+                  }
+                : pr,
+            );
+          }
+          break;
+        }
+        case EventType.PLAYER_COMPLETED: {
+          if (Array.isArray(next.puzzleProgress)) {
+            next.puzzleProgress = next.puzzleProgress.map((pr) =>
+              pr.id === p.playerId ? { ...pr, completed: true } : pr,
+            );
+          }
+          break;
+        }
+        case EventType.GAME_FINISHED: {
+          next.status = "FINISHED";
+          next.result = p as unknown as ResultView;
+          next.players = (p.standings as PlayerView[]) ?? next.players;
+          if (p.image) next.image = p.image as ClientState["image"];
+          break;
+        }
+        case EventType.NEW_GAME: {
+          next.status = (p.status as GameState) ?? "LOBBY";
+          next.result = null;
+          next.puzzle = null;
+          next.puzzleProgress = null;
+          next.image = next.isHost ? next.image : null;
+          next.imageName = null;
+          next.puzzleStartedAt = null;
+          break;
+        }
+        case EventType.ERROR: {
+          showToast((p.message as string) ?? "Something went wrong.");
+          break;
+        }
+      }
+      return next;
+    });
+  }, [showToast]);
+
+  useEffect(() => {
+    const socket = new FuzalSocket({
+      code: opts.code,
+      kind: opts.kind,
+      hostToken: opts.hostToken,
+      playerId: opts.playerId,
+      playerToken: opts.playerToken,
+      onEvent: applyEvent,
+      onStateChange: setConnState,
+    });
+    socketRef.current = socket;
+    socket.connect();
+    return () => socket.disconnect();
+    // Re-create the socket when credentials arrive from stored sessions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    opts.code,
+    opts.kind,
+    opts.hostToken ?? "",
+    opts.playerId ?? "",
+    opts.playerToken ?? "",
+  ]);
+
+  // 4fps ticker drives server-synchronized countdowns / elapsed time.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 250);
+    return () => clearInterval(id);
+  }, []);
+
+  const serverNow = useCallback(() => Date.now() + clockOffset.current, []);
+
+  const memorySeconds = (() => {
+    if (!state?.memory) return 0;
+    const ms = state.memory.endsAt - (Date.now() + clockOffset.current);
+    return Math.max(0, Math.ceil(ms / 1000));
+  })();
+
+  const puzzleElapsedMs = (() => {
+    if (!state) return 0;
+    const start = state.puzzle?.startedAt ?? state.puzzleStartedAt;
+    if (!start) return 0;
+    const end =
+      state.status === "FINISHED"
+        ? state.result?.finishedAt ?? Date.now() + clockOffset.current
+        : Date.now() + clockOffset.current;
+    return Math.max(0, end - start);
+  })();
+
+  /* ---------------- Actions ---------------- */
+
+  const startGame = useCallback(async () => {
+    if (!opts.hostToken) return;
+    try {
+      await postAction(opts.code, { type: "START_GAME", token: opts.hostToken });
+    } catch (e) {
+      showToast((e as Error).message);
+    }
+  }, [opts.code, opts.hostToken, showToast]);
+
+  const playAgain = useCallback(async () => {
+    if (!opts.hostToken) return;
+    try {
+      await postAction(opts.code, { type: "PLAY_AGAIN", token: opts.hostToken });
+    } catch (e) {
+      showToast((e as Error).message);
+    }
+  }, [opts.code, opts.hostToken, showToast]);
+
+  const backToLobby = useCallback(async () => {
+    if (!opts.hostToken) return;
+    try {
+      await postAction(opts.code, { type: "BACK_TO_LOBBY", token: opts.hostToken });
+    } catch (e) {
+      showToast((e as Error).message);
+    }
+  }, [opts.code, opts.hostToken, showToast]);
+
+  const swap = useCallback(
+    async (from: number, to: number) => {
+      if (!opts.playerId || !opts.playerToken || from === to) return;
+      // Optimistic swap for instant touch feedback; server frame is truth.
+      setState((prev) => {
+        if (!prev?.puzzle) return prev;
+        const board = swapPieces(prev.puzzle.board, from, to);
+        return {
+          ...prev,
+          puzzle: {
+            ...prev.puzzle,
+            board,
+            moves: prev.puzzle.moves + 1,
+            correctSlots: computeCorrect(board),
+          },
+        };
+      });
+      try {
+        await postAction(opts.code, {
+          type: "SWAP",
+          token: opts.playerToken,
+          playerId: opts.playerId,
+          from,
+          to,
+        });
+      } catch (e) {
+        showToast((e as Error).message);
+      }
+    },
+    [opts.code, opts.playerId, opts.playerToken, showToast],
+  );
+
+  /* ------------- Preload cropped pieces as blobs ------------- */
+  const [pieceSrcs, setPieceSrcs] = useState<Record<number, string>>({});
+  useEffect(() => {
+    if (state?.status !== "PUZZLE" || !state.puzzle || !opts.playerId || !opts.playerToken) {
+      return;
+    }
+    const total = state.gridCols * state.gridRows;
+    let cancelled = false;
+    const created: string[] = [];
+    async function preload() {
+      const entries = await Promise.all(
+        Array.from({ length: total }, async (_, pieceId) => {
+          const res = await fetch(
+            pieceUrl(opts.code!, pieceId, opts.playerId!, opts.playerToken!),
+          );
+          const blob = await res.blob();
+          return [pieceId, URL.createObjectURL(blob)] as const;
+        }),
+      );
+      if (cancelled) {
+        entries.forEach(([, u]) => URL.revokeObjectURL(u));
+        return;
+      }
+      const map: Record<number, string> = {};
+      entries.forEach(([id, u]) => {
+        map[id] = u;
+        created.push(u);
+      });
+      setPieceSrcs(map);
+    }
+    void preload();
+    return () => {
+      cancelled = true;
+      created.forEach((u) => URL.revokeObjectURL(u));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.status, state?.gridCols, state?.gridRows, opts.playerId, opts.code, opts.playerToken]);
+
+  return {
+    state,
+    connState,
+    toast,
+    goFlash,
+    serverNow,
+    memorySeconds,
+    puzzleElapsedMs,
+    pieceSrcs,
+    actions: { startGame, swap, playAgain, backToLobby },
+  };
+}

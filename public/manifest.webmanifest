@@ -1,0 +1,9 @@
+{
+  "name": "Fuzal Puzzle Arena",
+  "short_name": "Fuzal",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#05060f",
+  "theme_color": "#05060f",
+  "description": "Real-time multiplayer image puzzle for events."
+}

@@ -1,0 +1,759 @@
+/**
+ * LobbyService + GameService
+ * --------------------------
+ * The server is the single source of truth for:
+ *   game state, the clock/timer, player status, every player's board,
+ *   puzzle validation and winner determination.
+ *
+ * All mutations run inside `withLobbyLock`, so concurrent completion requests
+ * are serialized – only the first can become the winner.
+ */
+import { timingSafeEqual } from "node:crypto";
+import { config } from "./config";
+import { makePlayerId, makeToken, makeGameCode } from "./codes";
+import { imageService, SOURCE_VIEWBOX } from "./imageService";
+import { manager } from "./manager";
+import { findPlayer, lobbyRepo, withLobbyLock } from "./repo";
+import {
+  correctSlots,
+  generateShuffledBoard,
+  isSolved,
+  swapPieces,
+  validateIndex,
+} from "./puzzle";
+import {
+  EventType,
+  GameState,
+  VALID_TRANSITIONS,
+  PlayerConnection,
+  type GameEvent,
+  type Lobby,
+  type Player,
+} from "./types";
+
+/* ------------------------------------------------------------------ */
+/* Errors                                                              */
+/* ------------------------------------------------------------------ */
+
+export class GameError extends Error {
+  constructor(
+    public code:
+      | "NOT_FOUND"
+      | "FULL"
+      | "ALREADY_STARTED"
+      | "FORBIDDEN"
+      | "BAD_REQUEST"
+      | "CONFLICT"
+      | "INVALID_STATE",
+    message: string,
+    public httpStatus = 400,
+  ) {
+    super(message);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+function ev(
+  type: EventType,
+  payload: unknown,
+  lobbyId?: string,
+): GameEvent {
+  return { type, at: Date.now(), lobbyId, payload };
+}
+
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch {
+    return a === b;
+  }
+}
+
+function assertTransition(lobby: Lobby, to: GameState) {
+  if (!VALID_TRANSITIONS[lobby.status].includes(to)) {
+    throw new GameError(
+      "INVALID_STATE",
+      `Cannot move from ${lobby.status} to ${to}`,
+      409,
+    );
+  }
+}
+
+function clearLobbyTimers(lobby: Lobby) {
+  if (lobby.timerInterval) clearInterval(lobby.timerInterval);
+  if (lobby.endTimeout) clearTimeout(lobby.endTimeout);
+  lobby.timerInterval = null;
+  lobby.endTimeout = null;
+  for (const t of Object.values(lobby.disconnectTimers ?? {})) clearTimeout(t);
+  lobby.disconnectTimers = {};
+}
+
+function freeSlot(lobby: Lobby): number {
+  const used = new Set(lobby.players.map((p) => p.slot));
+  for (let i = 0; i < lobby.maxPlayers; i++) if (!used.has(i)) return i;
+  return lobby.players.length;
+}
+
+/** Player data that is always safe to share with every client. */
+export function publicPlayer(p: Player) {
+  return {
+    id: p.id,
+    name: p.name,
+    connected: p.connectionStatus === PlayerConnection.CONNECTED,
+    score: p.score,
+    slot: p.slot,
+  };
+}
+
+function playerProgress(p: Player) {
+  return {
+    ...publicPlayer(p),
+    moves: p.puzzle?.moves ?? 0,
+    correctCount: p.puzzle ? correctSlots(p.puzzle.board).filter(Boolean).length : 0,
+    completed: p.puzzle?.completed ?? false,
+  };
+}
+
+function memoryBlock(lobby: Lobby, now: number) {
+  if (!lobby.memory) return null;
+  return {
+    startedAt: lobby.memory.startedAt,
+    endsAt: lobby.memory.endsAt,
+    durationSeconds: lobby.memory.durationSeconds,
+    remaining: Math.max(
+      0,
+      Math.ceil((lobby.memory.endsAt - now) / 1000),
+    ),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Lobby service                                                       */
+/* ------------------------------------------------------------------ */
+
+export const lobbyService = {
+  async createLobby(opts?: {
+    gridCols?: number;
+    gridRows?: number;
+    memorySeconds?: number;
+  }): Promise<Lobby> {
+    const code = makeGameCode(4);
+    const lobby: Lobby = {
+      id: `FZ-${code}`,
+      code,
+      hostToken: makeToken(),
+      status: GameState.LOBBY,
+      players: [],
+      maxPlayers: config.maxPlayers,
+      gridCols: opts?.gridCols ?? config.gridCols,
+      gridRows: opts?.gridRows ?? config.gridRows,
+      memory: null,
+      puzzleStartedAt: null,
+      winnerId: null,
+      finishedAt: null,
+      lockChain: Promise.resolve(),
+      timerInterval: null,
+      endTimeout: null,
+      usedImageIds: [],
+      disconnectTimers: {},
+      createdAt: Date.now(),
+    };
+    await lobbyRepo.put(lobby);
+    return lobby;
+  },
+
+  async getLobby(code: string): Promise<Lobby> {
+    const lobby = await lobbyRepo.getByCode(code);
+    if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
+    return lobby;
+  },
+
+  /** Sanitized view for the pre-join page – never leaks tokens/boards. */
+  publicView(lobby: Lobby) {
+    return {
+      code: lobby.code,
+      lobbyId: lobby.id,
+      status: lobby.status,
+      maxPlayers: lobby.maxPlayers,
+      playerCount: lobby.players.length,
+      players: lobby.players.map(publicPlayer),
+      started:
+        lobby.status === GameState.MEMORY || lobby.status === GameState.PUZZLE,
+      full: lobby.players.length >= lobby.maxPlayers,
+    };
+  },
+
+  async join(code: string, name: string): Promise<{ lobby: Lobby; player: Player }> {
+    const lobby = await this.getLobby(code);
+    return withLobbyLock(lobby, async () => {
+      if (lobby.status === GameState.MEMORY || lobby.status === GameState.PUZZLE) {
+        throw new GameError(
+          "ALREADY_STARTED",
+          "Game has already started. Wait for the next round.",
+          403,
+        );
+      }
+      if (lobby.players.length >= lobby.maxPlayers) {
+        throw new GameError("FULL", "Lobby is full (5/5). Please wait for the next game.", 409);
+      }
+      if (
+        lobby.players.some(
+          (p) => p.name.trim().toLowerCase() === name.trim().toLowerCase(),
+        )
+      ) {
+        throw new GameError("CONFLICT", "That name is already taken in this game.", 409);
+      }
+      const player: Player = {
+        id: makePlayerId(),
+        name: name.trim(),
+        token: makeToken(),
+        joinedAt: Date.now(),
+        connectionStatus: PlayerConnection.CONNECTED,
+        score: 0,
+        slot: freeSlot(lobby),
+        puzzle: null,
+      };
+      lobby.players.push(player);
+      await lobbyRepo.put(lobby);
+
+      manager.broadcast(
+        code,
+        ev(EventType.PLAYER_JOINED, { player: publicPlayer(player) }, lobby.id),
+      );
+      manager.broadcast(
+        code,
+        ev(
+          EventType.LOBBY_UPDATED,
+          { players: lobby.players.map(publicPlayer), status: lobby.status },
+          lobby.id,
+        ),
+      );
+      return { lobby, player };
+    });
+  },
+
+  /** A player (or host) opened/re-opened the event stream. */
+  async handleConnect(
+    code: string,
+    opts: { hostToken?: string; playerId?: string; playerToken?: string },
+  ): Promise<{ lobby: Lobby; kind: "host" | "player"; player?: Player }> {
+    const lobby = await this.getLobby(code);
+    if (opts.hostToken) {
+      if (!safeEqual(opts.hostToken, lobby.hostToken)) {
+        throw new GameError("FORBIDDEN", "Invalid host token.", 403);
+      }
+      return { lobby, kind: "host" };
+    }
+    const player = findPlayer(lobby, opts.playerId ?? "");
+    if (!player || !opts.playerToken || !safeEqual(opts.playerToken, player.token)) {
+      throw new GameError("FORBIDDEN", "Invalid player session.", 403);
+    }
+    // Reconnect: cancel pending removal / flip status back to connected.
+    const pending = lobby.disconnectTimers?.[player.id];
+    if (pending) {
+      clearTimeout(pending);
+      delete lobby.disconnectTimers[player.id];
+    }
+    if (player.connectionStatus === PlayerConnection.DISCONNECTED) {
+      player.connectionStatus = PlayerConnection.CONNECTED;
+      await lobbyRepo.put(lobby);
+      manager.broadcast(
+        code,
+        ev(
+          EventType.PLAYER_STATUS,
+          { playerId: player.id, connected: true, player: publicPlayer(player) },
+          lobby.id,
+        ),
+      );
+      manager.broadcast(
+        code,
+        ev(
+          EventType.LOBBY_UPDATED,
+          { players: lobby.players.map(publicPlayer), status: lobby.status },
+          lobby.id,
+        ),
+      );
+    }
+    return { lobby, kind: "player", player };
+  },
+
+  async handleDisconnect(code: string, playerId: string): Promise<void> {
+    const lobby = await lobbyRepo.getByCode(code);
+    if (!lobby) return;
+    const player = findPlayer(lobby, playerId);
+    if (!player) return;
+    // Short grace window absorbs page refreshes / network blips.
+    lobby.disconnectTimers[playerId] = setTimeout(() => {
+      const current = lobby.players.find((p) => p.id === playerId);
+      if (!current) return;
+      current.connectionStatus = PlayerConnection.DISCONNECTED;
+      manager.broadcast(
+        code,
+        ev(
+          EventType.PLAYER_STATUS,
+          { playerId, connected: false, player: publicPlayer(current) },
+          lobby.id,
+        ),
+      );
+      manager.broadcast(
+        code,
+        ev(
+          EventType.LOBBY_UPDATED,
+          { players: lobby.players.map(publicPlayer), status: lobby.status },
+          lobby.id,
+        ),
+      );
+      // In the lobby a permanently-gone phone frees its seat; mid-game it keeps it.
+      if (lobby.status === GameState.LOBBY) {
+        const grace = setTimeout(async () => {
+          const fresh = await lobbyRepo.getByCode(code);
+          if (!fresh) return;
+          const stillThere = findPlayer(fresh, playerId);
+          if (
+            stillThere &&
+            stillThere.connectionStatus === PlayerConnection.DISCONNECTED &&
+            fresh.status === GameState.LOBBY
+          ) {
+            fresh.players = fresh.players.filter((p) => p.id !== playerId);
+            await lobbyRepo.put(fresh);
+            manager.broadcast(
+              code,
+              ev(EventType.PLAYER_LEFT, { playerId }, fresh.id),
+            );
+            manager.broadcast(
+              code,
+              ev(
+                EventType.LOBBY_UPDATED,
+                { players: fresh.players.map(publicPlayer), status: fresh.status },
+                fresh.id,
+              ),
+            );
+          }
+        }, config.disconnectGraceMs);
+        lobby.disconnectTimers[`${playerId}:remove`] = grace;
+      }
+    }, 2500);
+  },
+
+  /* ---------------------------------------------------------------- */
+  /* Snapshot sent on (re)connect – role-specific, anti-cheat aware    */
+  /* ---------------------------------------------------------------- */
+
+  buildSnapshot(lobby: Lobby, kind: "host" | "player", you?: Player) {
+    const now = Date.now();
+    const base = {
+      type: EventType.SNAPSHOT,
+      at: now,
+      lobbyId: lobby.id,
+      payload: {
+        code: lobby.code,
+        lobbyId: lobby.id,
+        status: lobby.status,
+        maxPlayers: lobby.maxPlayers,
+        gridCols: lobby.gridCols,
+        gridRows: lobby.gridRows,
+        serverNow: now,
+        players: lobby.players.map(publicPlayer),
+        you: you ? { id: you.id, name: you.name, score: you.score } : null,
+        isHost: kind === "host",
+        memory: null as null | ReturnType<typeof memoryBlock>,
+        image: null as null | { id: string; url: string; name: string },
+        imageName: null as string | null,
+        puzzle: null as null | Record<string, unknown>,
+        puzzleProgress: null as null | ReturnType<typeof playerProgress>[],
+        result: null as null | Record<string, unknown>,
+      },
+    };
+    const p = base.payload;
+
+    if (lobby.status === GameState.MEMORY && lobby.memory) {
+      p.memory = memoryBlock(lobby, now);
+      if (kind === "host") {
+        p.image = { ...lobby.memory.image };
+      } else {
+        p.imageName = lobby.memory.image.name;
+      }
+    }
+
+    if (lobby.status === GameState.PUZZLE) {
+      p.puzzleProgress = lobby.players.map(playerProgress);
+      if (kind === "player" && you?.puzzle) {
+        p.puzzle = {
+          board: you.puzzle.board,
+          moves: you.puzzle.moves,
+          startedAt: you.puzzle.startedAt,
+          correctSlots: correctSlots(you.puzzle.board),
+        };
+      }
+    }
+
+    if (lobby.status === GameState.FINISHED) {
+      p.puzzleProgress = lobby.players.map(playerProgress);
+      if (kind === "player" && you?.puzzle) {
+        p.puzzle = {
+          board: you.puzzle.board,
+          moves: you.puzzle.moves,
+          startedAt: you.puzzle.startedAt,
+          correctSlots: correctSlots(you.puzzle.board),
+        };
+      }
+      p.result = resultPayload(lobby);
+    }
+    return base;
+  },
+};
+
+/* ------------------------------------------------------------------ */
+/* Result / standings                                                 */
+/* ------------------------------------------------------------------ */
+
+function resultPayload(lobby: Lobby) {
+  const winner = lobby.players.find((p) => p.id === lobby.winnerId) ?? null;
+  const startedAt = lobby.puzzleStartedAt ?? Date.now();
+  const standings = lobby.players
+    .map((p) => ({
+      ...publicPlayer(p),
+      moves: p.puzzle?.moves ?? 0,
+      correctCount: p.puzzle
+        ? correctSlots(p.puzzle.board).filter(Boolean).length
+        : 0,
+      completed: p.puzzle?.completed ?? false,
+      durationMs: p.puzzle?.completedAt ? p.puzzle.completedAt - startedAt : null,
+    }))
+    .sort((a, b) => {
+      if (a.id === winner?.id) return -1;
+      if (b.id === winner?.id) return 1;
+      return b.correctCount - a.correctCount || a.moves - b.moves;
+    });
+  return {
+    winner: winner ? publicPlayer(winner) : null,
+    finishedAt: lobby.finishedAt,
+    durationMs:
+      lobby.finishedAt && lobby.puzzleStartedAt
+        ? lobby.finishedAt - lobby.puzzleStartedAt
+        : null,
+    image: lobby.memory?.image ? { ...lobby.memory.image } : null,
+    standings,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Game service – state machine, timers, validation, winner           */
+/* ------------------------------------------------------------------ */
+
+function assertHost(lobby: Lobby, token: string) {
+  if (!safeEqual(token, lobby.hostToken)) {
+    throw new GameError("FORBIDDEN", "Only the host can do that.", 403);
+  }
+}
+
+export const gameService = {
+  /** LOBBY → MEMORY */
+  async startGame(code: string, hostToken: string): Promise<void> {
+    const lobby = await lobbyService.getLobby(code);
+    await withLobbyLock(lobby, async () => {
+      assertHost(lobby, hostToken);
+      assertTransition(lobby, GameState.MEMORY);
+      if (lobby.players.length === 0) {
+        throw new GameError("BAD_REQUEST", "At least one player must join before starting.", 400);
+      }
+      const image = imageService.getRandomImage(lobby.usedImageIds);
+      lobby.usedImageIds.push(image.id);
+      const durationSeconds = config.memorySeconds;
+      const startedAt = Date.now();
+      const endsAt = startedAt + durationSeconds * 1000;
+      lobby.status = GameState.MEMORY;
+      lobby.memory = { image, startedAt, endsAt, durationSeconds };
+      lobby.winnerId = null;
+      lobby.finishedAt = null;
+      for (const p of lobby.players) p.puzzle = null;
+      await lobbyRepo.put(lobby);
+
+      manager.broadcast(code, ev(EventType.GAME_STARTED, { status: lobby.status, at: startedAt }, lobby.id));
+      // Host (big screen) receives the real image; phones only get the name.
+      manager.sendToHost(
+        code,
+        ev(
+          EventType.MEMORY_PHASE_STARTED,
+          { image, startedAt, endsAt, durationSeconds },
+          lobby.id,
+        ),
+      );
+      manager.broadcastToPlayers(
+        code,
+        ev(
+          EventType.MEMORY_PHASE_STARTED,
+          { imageName: image.name, startedAt, endsAt, durationSeconds },
+          lobby.id,
+        ),
+      );
+      manager.broadcast(
+        code,
+        ev(EventType.MEMORY_TIMER_UPDATED, { remaining: durationSeconds, endsAt }, lobby.id),
+      );
+
+      // Authoritative server clock: tick every second, hard transition at end.
+      lobby.timerInterval = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+        manager.broadcast(
+          code,
+          ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt }, lobby.id),
+        );
+      }, 1000);
+
+      lobby.endTimeout = setTimeout(() => {
+        void gameService.beginPuzzle(code).catch((e) => console.error("beginPuzzle", e));
+      }, durationSeconds * 1000 + 60);
+    });
+  },
+
+  /** MEMORY → PUZZLE (also called by the hard server timeout) */
+  async beginPuzzle(code: string): Promise<void> {
+    const lobby = await lobbyService.getLobby(code);
+    await withLobbyLock(lobby, async () => {
+      if (lobby.status === GameState.PUZZLE) return; // idempotent re-entry
+      assertTransition(lobby, GameState.PUZZLE);
+      if (lobby.timerInterval) clearInterval(lobby.timerInterval);
+      if (lobby.endTimeout) clearTimeout(lobby.endTimeout);
+      lobby.timerInterval = null;
+      lobby.endTimeout = null;
+
+      lobby.status = GameState.PUZZLE;
+      lobby.puzzleStartedAt = Date.now();
+      const total = lobby.gridCols * lobby.gridRows;
+      for (const p of lobby.players) {
+        // Every player receives an independent shuffle.
+        p.puzzle = {
+          board: generateShuffledBoard(total),
+          moves: 0,
+          startedAt: lobby.puzzleStartedAt,
+          completed: false,
+          completedAt: null,
+        };
+      }
+      await lobbyRepo.put(lobby);
+
+      manager.broadcast(
+        code,
+        ev(
+          EventType.PUZZLE_STARTED,
+          {
+            startedAt: lobby.puzzleStartedAt,
+            gridCols: lobby.gridCols,
+            gridRows: lobby.gridRows,
+            players: lobby.players.map(playerProgress),
+          },
+          lobby.id,
+        ),
+      );
+      // Personal shuffles go directly to each player only.
+      for (const p of lobby.players) {
+        const pz = p.puzzle;
+        if (!pz) continue;
+        manager.sendToPlayer(
+          code,
+          p.id,
+          ev(
+            EventType.PUZZLE_STARTED,
+            {
+              board: pz.board,
+              moves: 0,
+              startedAt: lobby.puzzleStartedAt,
+              gridCols: lobby.gridCols,
+              gridRows: lobby.gridRows,
+            },
+            lobby.id,
+          ),
+        );
+      }
+    });
+  },
+
+  /**
+   * Apply a tap-to-swap move. Player → server → authoritative validation.
+   * Runs under the per-lobby lock so the first solved board is the only winner.
+   */
+  async applySwap(
+    code: string,
+    playerId: string,
+    token: string,
+    from: number,
+    to: number,
+  ): Promise<void> {
+    const lobby = await lobbyService.getLobby(code);
+    await withLobbyLock(lobby, async () => {
+      const player = findPlayer(lobby, playerId);
+      if (!player) throw new GameError("NOT_FOUND", "Player not found.", 404);
+      if (!safeEqual(token, player.token)) {
+        throw new GameError("FORBIDDEN", "Invalid player token.", 403);
+      }
+      if (lobby.status !== GameState.PUZZLE) {
+        throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
+      }
+      const puzzle = player.puzzle;
+      if (!puzzle || puzzle.completed) {
+        throw new GameError("INVALID_STATE", "No active puzzle for player.", 409);
+      }
+      const total = lobby.gridCols * lobby.gridRows;
+      if (!validateIndex(from, total) || !validateIndex(to, total)) {
+        throw new GameError("BAD_REQUEST", "Invalid puzzle index.", 422);
+      }
+      if (from === to) return; // no-op tap, ignore
+
+      puzzle.board = swapPieces(puzzle.board, from, to);
+      puzzle.moves += 1;
+
+      const solved = isSolved(puzzle.board);
+      if (solved) {
+        puzzle.completed = true;
+        puzzle.completedAt = Date.now();
+        await lobbyRepo.put(lobby);
+
+        manager.sendToPlayer(
+          code,
+          player.id,
+          ev(
+            EventType.PUZZLE_MOVE,
+            {
+              board: puzzle.board,
+              moves: puzzle.moves,
+              correctSlots: correctSlots(puzzle.board),
+              completed: true,
+            },
+            lobby.id,
+          ),
+        );
+        manager.broadcast(
+          code,
+          ev(EventType.PLAYER_COMPLETED, { playerId: player.id, at: puzzle.completedAt }, lobby.id),
+        );
+        await gameService.finish(lobby, player);
+        return;
+      }
+
+      await lobbyRepo.put(lobby);
+      manager.sendToPlayer(
+        code,
+        player.id,
+        ev(
+          EventType.PUZZLE_MOVE,
+          {
+            board: puzzle.board,
+            moves: puzzle.moves,
+            correctSlots: correctSlots(puzzle.board),
+            completed: false,
+          },
+          lobby.id,
+        ),
+      );
+      // Host sees only progress counts – never the arrangement.
+      manager.sendToHost(
+        code,
+        ev(
+          EventType.PUZZLE_MOVE,
+          { playerId: player.id, moves: puzzle.moves, correctCount:
+            correctSlots(puzzle.board).filter(Boolean).length },
+          lobby.id,
+        ),
+      );
+    });
+  },
+
+  /** PUZZLE → FINISHED. Called only from within the lobby lock. */
+  async finish(lobby: Lobby, winner: Player): Promise<void> {
+    if (lobby.status === GameState.FINISHED) return; // atomic: only one winner
+    assertTransition(lobby, GameState.FINISHED);
+    lobby.status = GameState.FINISHED;
+    lobby.winnerId = winner.id;
+    lobby.finishedAt = Date.now();
+    winner.score += 1;
+    clearLobbyTimers(lobby);
+    await lobbyRepo.put(lobby);
+    manager.broadcast(
+      lobby.code,
+      ev(EventType.GAME_FINISHED, resultPayload(lobby), lobby.id),
+    );
+  },
+
+  /** FINISHED → MEMORY (PLAY AGAIN – keep players, new image, fresh puzzles). */
+  async playAgain(code: string, hostToken: string): Promise<void> {
+    const lobby = await lobbyService.getLobby(code);
+    await withLobbyLock(lobby, async () => {
+      assertHost(lobby, hostToken);
+      assertTransition(lobby, GameState.MEMORY);
+      clearLobbyTimers(lobby);
+      for (const p of lobby.players) p.puzzle = null;
+      const image = imageService.getRandomImage(lobby.usedImageIds);
+      lobby.usedImageIds.push(image.id);
+      const durationSeconds = config.memorySeconds;
+      const startedAt = Date.now();
+      const endsAt = startedAt + durationSeconds * 1000;
+      lobby.status = GameState.MEMORY;
+      lobby.memory = { image, startedAt, endsAt, durationSeconds };
+      lobby.winnerId = null;
+      lobby.finishedAt = null;
+      lobby.puzzleStartedAt = null;
+      await lobbyRepo.put(lobby);
+
+      manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));
+      manager.sendToHost(
+        code,
+        ev(EventType.MEMORY_PHASE_STARTED, { image, startedAt, endsAt, durationSeconds }, lobby.id),
+      );
+      manager.broadcastToPlayers(
+        code,
+        ev(
+          EventType.MEMORY_PHASE_STARTED,
+          { imageName: image.name, startedAt, endsAt, durationSeconds },
+          lobby.id,
+        ),
+      );
+      manager.broadcast(
+        code,
+        ev(EventType.MEMORY_TIMER_UPDATED, { remaining: durationSeconds, endsAt }, lobby.id),
+      );
+      lobby.timerInterval = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+        manager.broadcast(
+          code,
+          ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt }, lobby.id),
+        );
+      }, 1000);
+      lobby.endTimeout = setTimeout(() => {
+        void gameService.beginPuzzle(code).catch(console.error);
+      }, durationSeconds * 1000 + 60);
+    });
+  },
+
+  /** FINISHED → LOBBY (let new players join / adjust, then START again). */
+  async backToLobby(code: string, hostToken: string): Promise<void> {
+    const lobby = await lobbyService.getLobby(code);
+    await withLobbyLock(lobby, async () => {
+      assertHost(lobby, hostToken);
+      assertTransition(lobby, GameState.LOBBY);
+      clearLobbyTimers(lobby);
+      lobby.status = GameState.LOBBY;
+      lobby.memory = null;
+      lobby.puzzleStartedAt = null;
+      lobby.winnerId = null;
+      lobby.finishedAt = null;
+      for (const p of lobby.players) p.puzzle = null;
+      await lobbyRepo.put(lobby);
+      manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));
+      manager.broadcast(
+        code,
+        ev(
+          EventType.LOBBY_UPDATED,
+          { players: lobby.players.map(publicPlayer), status: lobby.status },
+          lobby.id,
+        ),
+      );
+    });
+  },
+};
+
+export { SOURCE_VIEWBOX };
