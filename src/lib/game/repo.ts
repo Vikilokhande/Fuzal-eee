@@ -20,6 +20,7 @@ import {
   type Player,
   type PuzzleInstance,
 } from "./types";
+import { GameError } from "./errors";
 
 export interface LobbyRepository {
   put(lobby: Lobby): Promise<Lobby>;
@@ -56,7 +57,11 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
       if (lobbyErr) {
         console.error(`[REPO_ERROR] Failed to upsert lobby ${code}:`, lobbyErr.message);
-        return lobby;
+        throw new GameError(
+          "INTERNAL_ERROR",
+          `Database error: ${lobbyErr.message}. Check that Supabase environment variables are configured.`,
+          500,
+        );
       }
 
       const lobbyDbId = lobbyRow.id;

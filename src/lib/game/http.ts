@@ -1,5 +1,5 @@
 import { ZodError } from "zod";
-import { GameError } from "./service";
+import { GameError } from "./errors";
 
 /** Maps domain / validation errors to friendly JSON responses. */
 export function errorResponse(e: unknown): Response {
