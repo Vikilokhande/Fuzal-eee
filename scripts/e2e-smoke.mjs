@@ -129,19 +129,21 @@ log("puzzles received; all distinct:", new Set(boards.map((b) => b.join())).size
 assert(new Set(boards.map((b) => b.join())).size === boards.length, "boards must differ per player");
 assert(boards.every((b) => b.some((x, i) => x !== i)), "boards must be shuffled");
 
-// Piece crop endpoint
+// Piece WebP endpoint
 const pieceOk = await fetch(
   `${BASE}/api/lobbies/${code}/piece/0?p=${players[0].id}&t=${players[0].token}`,
 );
+const contentType = pieceOk.headers.get("content-type") ?? "";
+const pieceBuf = await pieceOk.arrayBuffer();
 assert(
-  pieceOk.ok && (await pieceOk.text()).includes('viewBox="0 0 200 200"'),
-  "piece crop should expose a 200x200 viewBox",
+  pieceOk.ok && contentType.includes("image/webp") && pieceBuf.byteLength > 100,
+  "piece should return HTTP 200 with image/webp and valid binary data",
 );
 const pieceBad = await fetch(
   `${BASE}/api/lobbies/${code}/piece/0?p=${players[0].id}&t=wrong`,
 );
 assert(pieceBad.status === 403, "piece with bad token must be 403");
-log("piece cropping + auth OK");
+log("piece WebP delivery + auth OK (size: " + pieceBuf.byteLength + " bytes)");
 
 // 7. Solve player 0 locally with selection-sort, send each swap to server
 const board = [...boards[0]];

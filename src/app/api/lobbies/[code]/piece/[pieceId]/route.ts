@@ -1,24 +1,20 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { lobbyService } from "@/lib/game/service";
 import { findPlayer } from "@/lib/game/repo";
 import { GameState } from "@/lib/game/types";
-import { SOURCE_VIEWBOX } from "@/lib/game/imageService";
 import { safeEqualToken } from "@/lib/game/auth";
 import { errorResponse } from "@/lib/game/http";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const SAFE_FILE = /^image_\d{3}\.svg$/;
-
 /**
  * GET /api/lobbies/:code/piece/:pieceId?p=playerId&t=token
  *
- * Anti-cheat image delivery: returns ONLY the cropped SVG for one puzzle
- * piece (via a narrowed viewBox). The assembled original is never sent to
- * phones after the memory phase. Requires a valid player session and only
- * works while the puzzle (or finished reveal) is active.
+ * Storage-backed piece delivery:
+ * Serves pre-generated 200x200 WebP tiles directly from Supabase Storage.
+ * Completely eliminates runtime SVG manipulation and filesystem dependencies.
+ * Only accessible during PUZZLE or FINISHED states with valid player credentials.
  */
 export async function GET(
   req: Request,
@@ -35,11 +31,12 @@ export async function GET(
       lobby.status !== GameState.PUZZLE &&
       lobby.status !== GameState.FINISHED
     ) {
-      throw Object.assign(new Error("Puzzle is not active."), {
-        code: "INVALID_STATE",
-        httpStatus: 409,
-      }) as Error & { code: string; httpStatus: number };
+      return Response.json(
+        { error: "INVALID_STATE", message: "Puzzle is not active." },
+        { status: 409 },
+      );
     }
+
     const player = findPlayer(lobby, playerId);
     if (!player || !safeEqualToken(token, player.token)) {
       return Response.json(
@@ -52,7 +49,7 @@ export async function GET(
     const piece = Number(pieceParam);
     if (!Number.isInteger(piece) || piece < 0 || piece >= total) {
       return Response.json(
-        { error: "BAD_REQUEST", message: "Invalid piece." },
+        { error: "BAD_REQUEST", message: "Invalid piece index." },
         { status: 400 },
       );
     }
@@ -60,50 +57,39 @@ export async function GET(
     const image = lobby.memory?.image;
     if (!image) {
       return Response.json(
-        { error: "INVALID_STATE", message: "No image for this round." },
+        { error: "INVALID_STATE", message: "No active puzzle image." },
         { status: 409 },
       );
     }
-    const file = path.basename(image.url);
-    if (!SAFE_FILE.test(file)) {
-      return new Response("Bad image", { status: 500 });
+
+    const slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const pieceNumStr = String(piece).padStart(2, "0");
+    const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
+
+    const { data: fileData, error: storageErr } = await supabaseAdmin.storage
+      .from("puzzle-images")
+      .download(piecePath);
+
+    if (storageErr || !fileData) {
+      console.error(
+        `[PIECE_ERROR] Failed to fetch piece: lobby=${code}, piece=${piece}, path=${piecePath}, error=${storageErr?.message}`,
+      );
+      return Response.json(
+        { error: "NOT_FOUND", message: "Piece asset not found in storage." },
+        { status: 404 },
+      );
     }
 
-    const filePath = path.join(process.cwd(), "public", "images", file);
-    const source = await readFile(filePath, "utf8");
+    const arrayBuffer = await fileData.arrayBuffer();
 
-    const col = piece % lobby.gridCols;
-    const row = Math.floor(piece / lobby.gridCols);
-    const w = SOURCE_VIEWBOX / lobby.gridCols;
-    const h = SOURCE_VIEWBOX / lobby.gridRows;
-    const x = col * w;
-    const y = row * h;
-
-    const cropped = source
-      .replace(
-        /viewBox="[^"]*"/,
-        `viewBox="${x} ${y} ${w} ${h}"`,
-      )
-      .replace(
-        /<svg\b/,
-        '<svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice"',
-      );
-
-    return new Response(cropped, {
+    return new Response(arrayBuffer, {
+      status: 200,
       headers: {
-        "Content-Type": "image/svg+xml; charset=utf-8",
-        "Cache-Control": "no-store",
+        "Content-Type": "image/webp",
+        "Cache-Control": "public, max-age=86400, immutable",
       },
     });
   } catch (e) {
-    // Domain-style error thrown inline above
-    if (e && typeof e === "object" && "httpStatus" in e) {
-      const err = e as Error & { code: string; httpStatus: number };
-      return Response.json(
-        { error: err.code, message: err.message },
-        { status: err.httpStatus },
-      );
-    }
     return errorResponse(e);
   }
 }

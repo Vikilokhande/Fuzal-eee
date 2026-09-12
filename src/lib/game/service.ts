@@ -9,6 +9,7 @@
  * are serialized – only the first can become the winner.
  */
 import { timingSafeEqual } from "node:crypto";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 import { config } from "./config";
 import { makePlayerId, makeToken, makeGameCode } from "./codes";
 import { imageService, SOURCE_VIEWBOX } from "./imageService";
@@ -190,35 +191,51 @@ export const lobbyService = {
   async join(code: string, name: string): Promise<{ lobby: Lobby; player: Player }> {
     const lobby = await this.getLobby(code);
     return withLobbyLock(lobby, async () => {
-      if (lobby.status === GameState.MEMORY || lobby.status === GameState.PUZZLE) {
-        throw new GameError(
-          "ALREADY_STARTED",
-          "Game has already started. Wait for the next round.",
-          403,
-        );
+      const playerId = makePlayerId();
+      const playerToken = makeToken();
+
+      // Database-level atomic join: locks lobby row, enforces max 5 players, assigns slot 1..5
+      const { data: joinRes, error: rpcErr } = await supabaseAdmin.rpc("join_lobby_atomic", {
+        p_code: code.toUpperCase(),
+        p_player_id: playerId,
+        p_name: name.trim(),
+        p_token_hash: playerToken,
+      });
+
+      if (rpcErr) {
+        console.error("[JOIN_RPC_ERROR]", rpcErr.message);
+        throw new GameError("BAD_REQUEST", "Failed to join lobby.", 400);
       }
-      if (lobby.players.length >= lobby.maxPlayers) {
-        throw new GameError("FULL", "Lobby is full (5/5). Please wait for the next game.", 409);
+
+      if (joinRes?.error) {
+        const httpStatus =
+          joinRes.error === "FULL" || joinRes.error === "CONFLICT"
+            ? 409
+            : joinRes.error === "ALREADY_STARTED"
+              ? 403
+              : 400;
+        throw new GameError(joinRes.error, joinRes.message, httpStatus);
       }
-      if (
-        lobby.players.some(
-          (p) => p.name.trim().toLowerCase() === name.trim().toLowerCase(),
-        )
-      ) {
-        throw new GameError("CONFLICT", "That name is already taken in this game.", 409);
-      }
+
+      const assignedSlot = Number(joinRes?.slot ?? freeSlot(lobby));
+
       const player: Player = {
-        id: makePlayerId(),
+        id: playerId,
         name: name.trim(),
-        token: makeToken(),
+        token: playerToken,
         joinedAt: Date.now(),
         connectionStatus: PlayerConnection.CONNECTED,
         score: 0,
-        slot: freeSlot(lobby),
+        slot: assignedSlot,
         puzzle: null,
       };
-      lobby.players.push(player);
-      await lobbyRepo.put(lobby);
+
+      const existingIdx = lobby.players.findIndex((p) => p.id === player.id);
+      if (existingIdx >= 0) {
+        lobby.players[existingIdx] = player;
+      } else {
+        lobby.players.push(player);
+      }
 
       manager.broadcast(
         code,
@@ -471,6 +488,44 @@ export const gameService = {
       lobby.winnerId = null;
       lobby.finishedAt = null;
       for (const p of lobby.players) p.puzzle = null;
+
+      // Create a game round record in Supabase
+      try {
+        const { data: lobbyRow } = await supabaseAdmin
+          .from("lobbies")
+          .select("id")
+          .eq("code", code.toUpperCase())
+          .maybeSingle();
+
+        const { data: imgRow } = await supabaseAdmin
+          .from("puzzle_images")
+          .select("id")
+          .eq("name", image.name)
+          .maybeSingle();
+
+        if (lobbyRow && imgRow) {
+          const { data: gameRow, error: gErr } = await supabaseAdmin
+            .from("games")
+            .insert({
+              lobby_id: lobbyRow.id,
+              image_id: imgRow.id,
+              state: GameState.MEMORY,
+              memory_started_at: new Date(startedAt).toISOString(),
+              memory_ends_at: new Date(endsAt).toISOString(),
+            })
+            .select("id")
+            .single();
+
+          if (gameRow) {
+            lobby.currentGameId = gameRow.id;
+          } else if (gErr) {
+            console.error("[START_GAME_DB_ERR]", gErr.message);
+          }
+        }
+      } catch (err) {
+        console.error("[START_GAME_ERR]", err);
+      }
+
       await lobbyRepo.put(lobby);
 
       manager.broadcast(code, ev(EventType.GAME_STARTED, { status: lobby.status, at: startedAt }, lobby.id));
@@ -665,7 +720,25 @@ export const gameService = {
 
   /** PUZZLE → FINISHED. Called only from within the lobby lock. */
   async finish(lobby: Lobby, winner: Player): Promise<void> {
-    if (lobby.status === GameState.FINISHED) return; // atomic: only one winner
+    if (lobby.status === GameState.FINISHED) return; // in-process check
+
+    // Database-level atomic winner claiming (single-winner guarantee across instances)
+    if (lobby.currentGameId) {
+      const { data: claimed, error: claimErr } = await supabaseAdmin.rpc("claim_game_winner", {
+        p_game_id: lobby.currentGameId,
+        p_player_id: winner.id,
+      });
+
+      if (claimErr) {
+        console.error("[CLAIM_WINNER_ERROR]", claimErr.message);
+      }
+
+      if (claimed === false) {
+        console.log(`[WINNER_RACE] Player ${winner.name} (${winner.id}) was preempted by another winner.`);
+        return;
+      }
+    }
+
     assertTransition(lobby, GameState.FINISHED);
     lobby.status = GameState.FINISHED;
     lobby.winnerId = winner.id;
@@ -697,6 +770,44 @@ export const gameService = {
       lobby.winnerId = null;
       lobby.finishedAt = null;
       lobby.puzzleStartedAt = null;
+
+      // Create a fresh game round record in Supabase for the new round
+      try {
+        const { data: lobbyRow } = await supabaseAdmin
+          .from("lobbies")
+          .select("id")
+          .eq("code", code.toUpperCase())
+          .maybeSingle();
+
+        const { data: imgRow } = await supabaseAdmin
+          .from("puzzle_images")
+          .select("id")
+          .eq("name", image.name)
+          .maybeSingle();
+
+        if (lobbyRow && imgRow) {
+          const { data: gameRow, error: gErr } = await supabaseAdmin
+            .from("games")
+            .insert({
+              lobby_id: lobbyRow.id,
+              image_id: imgRow.id,
+              state: GameState.MEMORY,
+              memory_started_at: new Date(startedAt).toISOString(),
+              memory_ends_at: new Date(endsAt).toISOString(),
+            })
+            .select("id")
+            .single();
+
+          if (gameRow) {
+            lobby.currentGameId = gameRow.id;
+          } else if (gErr) {
+            console.error("[PLAY_AGAIN_DB_ERR]", gErr.message);
+          }
+        }
+      } catch (err) {
+        console.error("[PLAY_AGAIN_ERR]", err);
+      }
+
       await lobbyRepo.put(lobby);
 
       manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));
@@ -741,6 +852,7 @@ export const gameService = {
       lobby.puzzleStartedAt = null;
       lobby.winnerId = null;
       lobby.finishedAt = null;
+      lobby.currentGameId = null;
       for (const p of lobby.players) p.puzzle = null;
       await lobbyRepo.put(lobby);
       manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));

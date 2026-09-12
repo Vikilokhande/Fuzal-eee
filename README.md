@@ -23,13 +23,37 @@ the same game protocol**:
 | Backend | **Next.js Route Handlers** (Node runtime), service layer under `src/lib/game` | **Python · FastAPI · native WebSockets** (`backend/app`) |
 | Real-time | **Server-Sent Events** (socket-style client with auto-reconnect) | **WebSocket** `/ws/lobby/{code}` |
 | Validation | Zod (Pydantic-equivalent models) | Pydantic v2 |
-| State | In-memory, behind a swappable `LobbyRepository` interface (Redis/Postgres-ready) | Same design, in-memory services |
+| State & Storage | **Supabase PostgreSQL** (`lobbies`, `players`, `games`, `game_players`, `puzzle_images`) + **Supabase Storage** (`puzzle-images` bucket with pre-sliced WebP tiles) | Same design, in-memory services |
 
 The game *engine* (state machine, timer, shuffle, validation, atomic winner) is
 a 1:1 port between the two — same event names, same payload shapes, same
-rules. The live preview uses the Next.js fullstack app; `backend/` is the
-explicit **Python/FastAPI** deliverable requested in the spec and can run the
-game on its own with a static/Vite frontend.
+rules. The live preview uses the Next.js fullstack app with Supabase PostgreSQL and Storage; `backend/` is the
+explicit **Python/FastAPI** reference deliverable.
+
+### Supabase Storage & Pre-generated WebP Tiles
+Instead of runtime SVG manipulation, puzzle pieces are pre-generated as 16 square WebP tiles (approx 200×200) and stored in the `puzzle-images` Supabase Storage bucket:
+```
+puzzle-images/
+  ├── cosmic-fox/
+  │   ├── original.webp
+  │   └── pieces/ (00.webp ... 15.webp)
+  └── ...
+```
+Mobile clients preload all 16 pieces upon receiving `PUZZLE_STARTED`, validating HTTP 200 and `image/webp` with up to 3 retries.
+
+### Environment variables:
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Public browser-safe anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes (Server only) | Privileged admin key for database and storage |
+| `NEXT_PUBLIC_SITE_URL` | Recommended | Canonical domain used inside QR code (e.g. `https://your-domain.com`) |
+| `FUZAL_MAX_PLAYERS` | Optional (default `5`) | Hard player cap (enforced server & DB atomic RPC) |
+| `FUZAL_MEMORY_SECONDS` | Optional (default `30`) | Memory-phase length |
+| `FUZAL_GRID_COLS` / `FUZAL_GRID_ROWS` | Optional (default `4`/`4`) | Grid size (16 pieces) |
+
+The QR code canonical URL is resolved using `src/lib/urls.ts` (prioritizing `NEXT_PUBLIC_SITE_URL` → `VERCEL_URL` → localhost fallback).
 
 ### Why SSE in the Next.js app?
 Raw WebSocket upgrades aren't exposed by managed Next.js route handlers.
@@ -88,17 +112,7 @@ Production:
 npm run build && npm start
 ```
 
-Configuration via environment variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `FUZAL_MAX_PLAYERS` | `5` | Hard player cap (enforced server-side) |
-| `FUZAL_MEMORY_SECONDS` | `30` | Memory-phase length |
-| `FUZAL_GRID_COLS` / `FUZAL_GRID_ROWS` | `4` / `4` | Grid size (supports 3–6) |
-| `NEXT_PUBLIC_SITE_URL` | *(page origin)* | Canonical origin used inside the QR URL |
-
-The QR code always encodes `${window.location.origin}/join/{code}` — no
-hardcoded `localhost`.
+Configuration: see the [Environment variables](#environment-variables) section above.
 
 ---
 

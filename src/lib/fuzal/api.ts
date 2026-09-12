@@ -78,10 +78,11 @@ export function pieceUrl(
   )}&t=${encodeURIComponent(token)}`;
 }
 
-/** QR payload — uses the page origin, never a hardcoded localhost. */
+import { getJoinUrl } from "@/lib/urls";
+
+/** QR payload — uses canonical site URL priority: NEXT_PUBLIC_SITE_URL > VERCEL_URL > origin. */
 export function joinUrlFor(code: string): string {
-  if (typeof window === "undefined") return `/join/${code}`;
-  return `${window.location.origin}/join/${code}`;
+  return getJoinUrl(code);
 }
 
 const KEY_PREFIX = "fuzal:v1:";

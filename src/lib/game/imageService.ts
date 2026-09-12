@@ -11,12 +11,45 @@
  */
 import type { ImageMeta } from "./types";
 
+const supabaseUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ??
+  "https://dewdcxssvkvbgyyenmmu.supabase.co";
+
+function getStorageOriginalUrl(slug: string): string {
+  return `${supabaseUrl}/storage/v1/object/public/puzzle-images/${slug}/original.webp`;
+}
+
 const IMAGES: ImageMeta[] = [
-  { id: "image_001", url: "/images/image_001.svg", name: "Mountain Vista" },
-  { id: "image_002", url: "/images/image_002.svg", name: "Deep Ocean" },
-  { id: "image_003", url: "/images/image_003.svg", name: "Cosmic Journey" },
-  { id: "image_004", url: "/images/image_004.svg", name: "Enchanted Forest" },
-  { id: "image_005", url: "/images/image_005.svg", name: "Neon City" },
+  {
+    id: "image_001",
+    slug: "cosmic-fox",
+    url: getStorageOriginalUrl("cosmic-fox"),
+    name: "Cosmic Fox",
+  },
+  {
+    id: "image_002",
+    slug: "futuristic-city",
+    url: getStorageOriginalUrl("futuristic-city"),
+    name: "Futuristic City",
+  },
+  {
+    id: "image_003",
+    slug: "space-explorer",
+    url: getStorageOriginalUrl("space-explorer"),
+    name: "Space Explorer",
+  },
+  {
+    id: "image_004",
+    slug: "neon-cyberpunk",
+    url: getStorageOriginalUrl("neon-cyberpunk"),
+    name: "Neon Cyberpunk",
+  },
+  {
+    id: "image_005",
+    slug: "abstract-geometry",
+    url: getStorageOriginalUrl("abstract-geometry"),
+    name: "Abstract Geometry",
+  },
 ];
 
 export class ImageService {

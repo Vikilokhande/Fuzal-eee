@@ -45,6 +45,7 @@ async function moveOneFromSolved(code: string, playerIndex: number, swap: [numbe
   const [a, b] = swap;
   [board[a], board[b]] = [board[b], board[a]];
   player.puzzle!.board = board;
+  await lobbyRepo.put(lobby!);
 }
 
 describe("lobby lifecycle", () => {

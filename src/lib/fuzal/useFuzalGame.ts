@@ -328,8 +328,17 @@ export function useFuzalGame(opts: UseOpts) {
     [opts.code, opts.playerId, opts.playerToken, showToast],
   );
 
-  /* ------------- Preload cropped pieces as blobs ------------- */
+  /* ------------- Preload puzzle pieces with retry & validation ------------- */
   const [pieceSrcs, setPieceSrcs] = useState<Record<number, string>>({});
+  const [piecesLoading, setPiecesLoading] = useState(false);
+  const [piecesError, setPiecesError] = useState<string | null>(null);
+  const [loadAttempts, setLoadAttempts] = useState(0);
+
+  const retryLoadPieces = useCallback(() => {
+    setPiecesError(null);
+    setLoadAttempts((c) => c + 1);
+  }, []);
+
   useEffect(() => {
     if (state?.status !== "PUZZLE" || !state.puzzle || !opts.playerId || !opts.playerToken) {
       return;
@@ -337,34 +346,84 @@ export function useFuzalGame(opts: UseOpts) {
     const total = state.gridCols * state.gridRows;
     let cancelled = false;
     const created: string[] = [];
-    async function preload() {
-      const entries = await Promise.all(
-        Array.from({ length: total }, async (_, pieceId) => {
-          const res = await fetch(
-            pieceUrl(opts.code!, pieceId, opts.playerId!, opts.playerToken!),
-          );
+
+    async function fetchTileWithRetry(pieceId: number, maxRetries = 3): Promise<string> {
+      let lastErr = "";
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        if (cancelled) throw new Error("Cancelled");
+        try {
+          const url = pieceUrl(opts.code!, pieceId, opts.playerId!, opts.playerToken!);
+          const res = await fetch(url, { cache: "no-cache" });
+          if (!res.ok) {
+            const errText = await res.text().catch(() => "");
+            lastErr = `HTTP ${res.status}: ${errText}`;
+            await new Promise((r) => setTimeout(r, 300 * attempt));
+            continue;
+          }
+          const cType = res.headers.get("content-type") ?? "";
+          if (!cType.includes("image")) {
+            lastErr = `Expected image content-type, got: ${cType}`;
+            await new Promise((r) => setTimeout(r, 300 * attempt));
+            continue;
+          }
           const blob = await res.blob();
-          return [pieceId, URL.createObjectURL(blob)] as const;
-        }),
-      );
-      if (cancelled) {
-        entries.forEach(([, u]) => URL.revokeObjectURL(u));
-        return;
+          const objectUrl = URL.createObjectURL(blob);
+          created.push(objectUrl);
+          return objectUrl;
+        } catch (e) {
+          lastErr = (e as Error).message;
+          await new Promise((r) => setTimeout(r, 300 * attempt));
+        }
       }
-      const map: Record<number, string> = {};
-      entries.forEach(([id, u]) => {
-        map[id] = u;
-        created.push(u);
-      });
-      setPieceSrcs(map);
+      throw new Error(`Failed to load piece #${pieceId} (${lastErr})`);
     }
+
+    async function preload() {
+      setPiecesLoading(true);
+      setPiecesError(null);
+
+      try {
+        const results = await Promise.all(
+          Array.from({ length: total }, (_, pieceId) =>
+            fetchTileWithRetry(pieceId, 3).then((url) => [pieceId, url] as const),
+          ),
+        );
+
+        if (cancelled) {
+          created.forEach((u) => URL.revokeObjectURL(u));
+          return;
+        }
+
+        const map: Record<number, string> = {};
+        for (const [id, u] of results) {
+          map[id] = u;
+        }
+        setPieceSrcs(map);
+        setPiecesLoading(false);
+      } catch (err) {
+        if (!cancelled) {
+          console.error("[PRELOAD_ERROR]", err);
+          setPiecesError((err as Error).message);
+          setPiecesLoading(false);
+        }
+      }
+    }
+
     void preload();
+
     return () => {
       cancelled = true;
       created.forEach((u) => URL.revokeObjectURL(u));
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.status, state?.gridCols, state?.gridRows, opts.playerId, opts.code, opts.playerToken]);
+  }, [
+    state?.status,
+    state?.gridCols,
+    state?.gridRows,
+    opts.playerId,
+    opts.code,
+    opts.playerToken,
+    loadAttempts,
+  ]);
 
   return {
     state,
@@ -375,6 +434,9 @@ export function useFuzalGame(opts: UseOpts) {
     memorySeconds,
     puzzleElapsedMs,
     pieceSrcs,
+    piecesLoading,
+    piecesError,
+    retryLoadPieces,
     actions: { startGame, swap, playAgain, backToLobby },
   };
 }

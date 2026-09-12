@@ -52,7 +52,18 @@ export default function PlayerGamePage() {
         }
       : { code, kind: "player" },
   );
-  const { state, connState, toast, goFlash, memorySeconds, puzzleElapsedMs, pieceSrcs } = game;
+  const {
+    state,
+    connState,
+    toast,
+    goFlash,
+    memorySeconds,
+    puzzleElapsedMs,
+    pieceSrcs,
+    piecesLoading,
+    piecesError,
+    retryLoadPieces,
+  } = game;
 
   const totalPieces = useMemo(
     () => (state ? state.gridCols * state.gridRows : 16),
@@ -216,6 +227,9 @@ export default function PlayerGamePage() {
                   cols={state.gridCols}
                   rows={state.gridRows}
                   pieceSrcs={pieceSrcs}
+                  loading={piecesLoading}
+                  error={piecesError}
+                  onRetry={retryLoadPieces}
                   onSwap={game.actions.swap}
                 />
               ) : (

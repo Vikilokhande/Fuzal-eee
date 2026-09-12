@@ -63,6 +63,7 @@ export interface ImageMeta {
   id: string;
   url: string;
   name: string;
+  slug?: string;
 }
 
 export interface MemoryPhase {
@@ -81,6 +82,7 @@ export interface Lobby {
   maxPlayers: number;
   gridCols: number;
   gridRows: number;
+  currentGameId?: string | null;
   memory: MemoryPhase | null;
   puzzleStartedAt: number | null;
   winnerId: string | null;
@@ -128,7 +130,8 @@ export interface GameEvent<T = unknown> {
 /* ------------------------------------------------------------------ */
 
 export const LOBBY_CODE_RE = /^[A-Z0-9]{4}$/;
-export const PLAYER_ID_RE = /^p_[A-Za-z0-9]{10,}$/;
+export const PLAYER_ID_RE =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|p_[A-Za-z0-9]{10,})$/i;
 export const NAME_RE = /^[\p{L}\p{N} _.\-']{1,16}$/u;
 
 export const createLobbySchema = z.object({

@@ -1,4 +1,4 @@
-import { randomBytes, randomInt } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous 0/O/1/I
 
@@ -15,7 +15,7 @@ export function makeLobbyId(): string {
 }
 
 export function makePlayerId(): string {
-  return `p_${randomBytes(9).toString("hex")}`;
+  return randomUUID();
 }
 
 export function makeToken(): string {
