@@ -388,11 +388,30 @@ export function useFuzalGame(opts: UseOpts) {
     setLoadAttempts((c) => c + 1);
   }, []);
 
+  // Reset piece srcs when returning to lobby for a new round
   useEffect(() => {
-    if (state?.status !== "PUZZLE" || !state.puzzle || !opts.playerId || !opts.playerToken) {
+    if (state?.status === "LOBBY") {
+      setPieceSrcs({});
+      setPiecesError(null);
+    }
+  }, [state?.status]);
+
+  useEffect(() => {
+    if (
+      (state?.status !== "MEMORY" && state?.status !== "PUZZLE") ||
+      !opts.playerId ||
+      !opts.playerToken ||
+      !opts.code
+    ) {
       return;
     }
-    const total = state.gridCols * state.gridRows;
+    const total = (state.gridCols ?? 4) * (state.gridRows ?? 4);
+
+    // If already loaded for this round, do nothing
+    if (Object.keys(pieceSrcs).length >= total) {
+      return;
+    }
+
     let cancelled = false;
     const created: string[] = [];
 
@@ -402,7 +421,6 @@ export function useFuzalGame(opts: UseOpts) {
         if (cancelled) throw new Error("Cancelled");
         try {
           const url = pieceUrl(opts.code!, pieceId, opts.playerId!, opts.playerToken!);
-          // Allow browser caching of immutable WebP piece tiles
           const res = await fetch(url);
           if (!res.ok) {
             const errText = await res.text().catch(() => "");
@@ -433,7 +451,27 @@ export function useFuzalGame(opts: UseOpts) {
       setPiecesError(null);
 
       try {
-        // Progressive loading: update state as each piece arrives so counter advances smoothly
+        // Fast path: Single batch request for all 16 pieces (<20KB, ~50ms)
+        const batchUrl = `/api/lobbies/${opts.code}/pieces?p=${encodeURIComponent(
+          opts.playerId!,
+        )}&t=${encodeURIComponent(opts.playerToken!)}`;
+        const batchRes = await fetch(batchUrl);
+        if (batchRes.ok) {
+          const batchData = await batchRes.json();
+          if (
+            batchData.ok &&
+            batchData.pieces &&
+            Object.keys(batchData.pieces).length === total
+          ) {
+            if (!cancelled) {
+              setPieceSrcs(batchData.pieces);
+              setPiecesLoading(false);
+              return;
+            }
+          }
+        }
+
+        // Fallback path: Progressive individual tile prefetching
         await Promise.all(
           Array.from({ length: total }, (_, pieceId) =>
             fetchTileWithRetry(pieceId, 3).then((url) => {
@@ -473,6 +511,7 @@ export function useFuzalGame(opts: UseOpts) {
     opts.code,
     opts.playerToken,
     loadAttempts,
+    pieceSrcs,
   ]);
 
   return {

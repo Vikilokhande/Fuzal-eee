@@ -10,14 +10,15 @@ class ImageMeta:
     id: str
     url: str
     name: str
+    slug: str = ""
 
 
 IMAGES: list[ImageMeta] = [
-    ImageMeta("image_001", "/images/image_001.svg", "Mountain Vista"),
-    ImageMeta("image_002", "/images/image_002.svg", "Deep Ocean"),
-    ImageMeta("image_003", "/images/image_003.svg", "Cosmic Journey"),
-    ImageMeta("image_004", "/images/image_004.svg", "Enchanted Forest"),
-    ImageMeta("image_005", "/images/image_005.svg", "Neon City"),
+    ImageMeta("image_001", "/images/image_001.svg", "Cosmic Fox", "cosmic-fox"),
+    ImageMeta("image_002", "/images/image_002.svg", "Futuristic City", "futuristic-city"),
+    ImageMeta("image_003", "/images/image_003.svg", "Space Explorer", "space-explorer"),
+    ImageMeta("image_004", "/images/image_004.svg", "Neon Cyberpunk", "neon-cyberpunk"),
+    ImageMeta("image_005", "/images/image_005.svg", "Abstract Geometry", "abstract-geometry"),
 ]
 
 

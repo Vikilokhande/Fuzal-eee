@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * Mobile-first puzzle board. Primary interaction:
- *   tap piece A (highlight) → tap piece B → swap.
- * Also supports HTML5 drag-and-drop where available (desktop).
- * The board rendered here is the SERVER's board (echoed back per move),
- * ensuring the client can never desync from authoritative state.
+ * Mobile-first puzzle board. Pure Tap-to-Swap interaction:
+ *   1. Tap piece A → highlighted with cyan border/glow.
+ *   2. Tap piece B → pieces swap authoritatively on server.
+ *   3. Tap piece A again → deselects piece A.
+ *
+ * Drag-and-drop has been completely removed to prevent ghost-dragging,
+ * touch scroll interception, and image stretching/movement issues on mobile.
  */
 export function PuzzleBoard({
   board,
@@ -32,7 +34,6 @@ export function PuzzleBoard({
 }) {
   const [selected, setSelected] = useState<number | null>(null);
   const [animSlots, setAnimSlots] = useState<number[]>([]);
-  const [dragSlot, setDragSlot] = useState<number | null>(null);
   const previous = useRef<number[]>(board);
   const animTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -45,7 +46,7 @@ export function PuzzleBoard({
     if (changed.length > 0) {
       setAnimSlots(changed);
       if (animTimer.current) clearTimeout(animTimer.current);
-      animTimer.current = setTimeout(() => setAnimSlots([]), 340);
+      animTimer.current = setTimeout(() => setAnimSlots([]), 250);
     }
     return () => {
       if (animTimer.current) clearTimeout(animTimer.current);
@@ -69,8 +70,10 @@ export function PuzzleBoard({
         navigator.vibrate(12);
       }
     } else if (selected === slot) {
+      // Tap selected piece again to deselect
       setSelected(null);
     } else {
+      // Tap different piece to swap
       requestSwap(selected, slot);
       setSelected(null);
       if (typeof navigator !== "undefined" && navigator.vibrate) {
@@ -106,7 +109,7 @@ export function PuzzleBoard({
   }
 
   return (
-    <div className="relative w-full max-w-[min(94vw,560px)]">
+    <div className="relative w-full max-w-[min(94vw,560px)] select-none">
       {/* Loading overlay while preloading all 16 tiles */}
       {!ready && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-2xl bg-black/75 backdrop-blur-sm">
@@ -117,11 +120,13 @@ export function PuzzleBoard({
         </div>
       )}
 
+      {/* Touch action manipulation prevents pinch-zoom and scroll interference during gameplay */}
       <div
         className="no-select grid w-full gap-[3px] rounded-2xl bg-black/40 p-[3px] shadow-[0_18px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10"
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           aspectRatio: "1 / 1",
+          touchAction: "manipulation",
         }}
         role="grid"
         aria-label="Puzzle board"
@@ -134,42 +139,37 @@ export function PuzzleBoard({
           return (
             <button
               key={slot}
+              type="button"
               role="gridcell"
               aria-label={`Piece position ${slot + 1}`}
               disabled={!isInteractive}
-              draggable={isInteractive}
-              onDragStart={() => setDragSlot(slot)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => {
-                if (dragSlot !== null) requestSwap(dragSlot, slot);
-                setDragSlot(null);
-                setSelected(null);
-              }}
               onClick={() => handleTap(slot)}
-              className={`relative aspect-square overflow-hidden rounded-[7px] bg-slate-800/80 outline-none transition-transform duration-150 ${
-                isSelected ? "piece-selected" : ""
-              } ${isCorrect && ready ? "piece-correct" : ""} ${
+              style={{ touchAction: "manipulation" }}
+              className={`relative aspect-square overflow-hidden rounded-[7px] bg-slate-800/80 outline-none transition-all duration-100 ${
+                isSelected
+                  ? "ring-2 ring-cyan-400 shadow-[0_0_14px_rgba(34,211,238,0.75)] scale-[0.96] z-10"
+                  : ""
+              } ${isCorrect && ready && !isSelected ? "ring-1 ring-emerald-500/40" : ""} ${
                 isAnimating ? "animate-swap" : ""
-              } ${isInteractive ? "cursor-pointer" : "cursor-default"}`}
+              } ${isInteractive ? "cursor-pointer active:opacity-90" : "cursor-default"}`}
             >
               {src ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={src}
                   alt={`Tile ${pieceId}`}
+                  loading="eager"
+                  decoding="async"
                   draggable={false}
-                  className="pointer-events-none h-full w-full object-cover"
+                  className="pointer-events-none select-none h-full w-full object-cover"
                 />
               ) : (
                 <span className="shimmer absolute inset-0" />
               )}
               {isCorrect && ready && (
-                <span className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-full bg-emerald-400 text-[9px] font-black text-emerald-950">
+                <span className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-full bg-emerald-400 text-[9px] font-black text-emerald-950 shadow">
                   ✓
                 </span>
-              )}
-              {isSelected && (
-                <span className="absolute inset-0 ring-2 ring-cyan-300/90" />
               )}
             </button>
           );

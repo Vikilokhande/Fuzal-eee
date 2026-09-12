@@ -2,6 +2,7 @@ import { lobbyRepo } from "@/lib/game/repo";
 import { GameState } from "@/lib/game/types";
 import { safeEqualToken } from "@/lib/game/auth";
 import { errorResponse } from "@/lib/game/http";
+import { getPieceBuffer } from "@/lib/game/puzzlePiecesData";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
@@ -11,10 +12,6 @@ export const runtime = "nodejs";
  * In-memory global piece buffer cache:
  * Key: `${slug}:${pieceId}`
  * Value: ArrayBuffer of the 200x200 WebP tile (~850 bytes)
- *
- * All 80 WebP tiles across the 5 puzzles total less than 70KB in memory.
- * Storing them in RAM makes piece delivery instantaneous (<1ms) and completely
- * eliminates repetitive remote Supabase Storage round-trips.
  */
 const pieceCache = new Map<string, ArrayBuffer>();
 
@@ -22,9 +19,6 @@ const pieceCache = new Map<string, ArrayBuffer>();
  * Short-lived in-memory auth cache:
  * Key: `${code}:${playerId}:${token}`
  * Value: { slug: string; expiresAt: number }
- *
- * When mobile players load 16 pieces simultaneously, piece 0 verifies the session,
- * and pieces 1..15 hit the cache in 0ms without executing 60 redundant SQL queries.
  */
 interface AuthEntry {
   slug: string;
@@ -61,7 +55,9 @@ export async function GET(
       const localLobby = (lobbyRepo as any).processLobbies?.get(code);
       if (
         localLobby &&
-        (localLobby.status === GameState.PUZZLE || localLobby.status === GameState.FINISHED)
+        (localLobby.status === GameState.MEMORY ||
+          localLobby.status === GameState.PUZZLE ||
+          localLobby.status === GameState.FINISHED)
       ) {
         const p = localLobby.players.find((x: any) => x.id === playerId);
         if (p && safeEqualToken(token, p.token)) {
@@ -76,9 +72,13 @@ export async function GET(
         if (!lobby) {
           return Response.json({ error: "NOT_FOUND", message: "Lobby not found." }, { status: 404 });
         }
-        if (lobby.status !== GameState.PUZZLE && lobby.status !== GameState.FINISHED) {
+        if (
+          lobby.status !== GameState.MEMORY &&
+          lobby.status !== GameState.PUZZLE &&
+          lobby.status !== GameState.FINISHED
+        ) {
           return Response.json(
-            { error: "INVALID_STATE", message: "Puzzle is not active." },
+            { error: "INVALID_STATE", message: "Puzzle is not active or memorizing." },
             { status: 409 },
           );
         }
@@ -112,7 +112,19 @@ export async function GET(
       );
     }
 
-    // 2. Fetch piece binary: Check in-memory piece buffer cache first
+    // 2. Ultra-Fast: Check pre-sliced 200x200 WebP bundle first (0ms)
+    const embeddedBuf = getPieceBuffer(slug, piece);
+    if (embeddedBuf) {
+      return new Response(embeddedBuf as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          "Content-Type": "image/webp",
+          "Cache-Control": "public, max-age=86400, immutable",
+        },
+      });
+    }
+
+    // 3. Fallback: In-memory piece cache or storage
     const pieceNumStr = String(piece).padStart(2, "0");
     const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
     let arrayBuffer = pieceCache.get(piecePath);
@@ -124,7 +136,7 @@ export async function GET(
 
       let fetchedData: ArrayBuffer | null = null;
       try {
-        const cdnRes = await fetch(cdnUrl, { next: { revalidate: 86400 } });
+        const cdnRes = await fetch(cdnUrl);
         if (cdnRes.ok) {
           fetchedData = await cdnRes.arrayBuffer();
         }

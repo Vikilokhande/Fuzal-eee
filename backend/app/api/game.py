@@ -66,8 +66,8 @@ async def get_piece(code: str, piece_id: int, p: str = "", t: str = ""):
     to players during the puzzle."""
     try:
         lobby = game_service.get(code)
-        if lobby.status not in (GameState.PUZZLE, GameState.FINISHED):
-            raise GameError("INVALID_STATE", "Puzzle is not active.", 409)
+        if lobby.status not in (GameState.MEMORY, GameState.PUZZLE, GameState.FINISHED):
+            raise GameError("INVALID_STATE", "Puzzle is not active or memorizing.", 409)
         player = game_service._find(lobby, p)
         if not player or not (player.token and t and player.token == t):
             return JSONResponse(
@@ -105,7 +105,60 @@ async def get_piece(code: str, piece_id: int, p: str = "", t: str = ""):
         return Response(
             content=cropped,
             media_type="image/svg+xml",
-            headers={"Cache-Control": "no-store"},
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except GameError as e:
+        return game_error(e)
+
+
+@router.get("/{code}/pieces")
+async def get_pieces(code: str, p: str = "", t: str = ""):
+    """Return ALL 16 cropped SVG pieces as data URLs in a single batch response."""
+    import base64
+
+    try:
+        lobby = game_service.get(code)
+        if lobby.status not in (GameState.MEMORY, GameState.PUZZLE, GameState.FINISHED):
+            raise GameError("INVALID_STATE", "Puzzle is not active or memorizing.", 409)
+        player = game_service._find(lobby, p)
+        if not player or not (player.token and t and player.token == t):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "FORBIDDEN", "message": "Invalid player session."},
+            )
+        if not lobby.memory:
+            raise GameError("INVALID_STATE", "No image for this round.", 409)
+        file_name = Path(lobby.memory.image["url"]).name
+        if not SAFE_FILE.match(file_name):
+            return Response("Bad image", status_code=500)
+        source = (settings.images_dir / file_name).read_text(encoding="utf-8")
+
+        w = SOURCE_VIEWBOX / lobby.grid_cols
+        h = SOURCE_VIEWBOX / lobby.grid_rows
+        pieces: dict[int, str] = {}
+
+        total = lobby.grid_cols * lobby.grid_rows
+        for piece_id in range(total):
+            col = piece_id % lobby.grid_cols
+            row = piece_id // lobby.grid_cols
+            x, y = col * w, row * h
+            cropped = re.sub(
+                r'viewBox="[^"]*"',
+                f'viewBox="{x} {y} {w} {h}"',
+                source,
+                count=1,
+            ).replace(
+                "<svg",
+                '<svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice"',
+                1,
+            )
+            b64 = base64.b64encode(cropped.encode("utf-8")).decode("ascii")
+            pieces[piece_id] = f"data:image/svg+xml;base64,{b64}"
+
+        return JSONResponse(
+            status_code=200,
+            content={"ok": True, "pieces": pieces},
+            headers={"Cache-Control": "private, max-age=3600"},
         )
     except GameError as e:
         return game_error(e)

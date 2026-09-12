@@ -5,6 +5,7 @@ import { manager } from "../manager";
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
 import { EventType, GameState, type GameEvent } from "../types";
 import { GET as pieceRouteGET } from "@/app/api/lobbies/[code]/piece/[pieceId]/route";
+import { GET as piecesBatchRouteGET } from "@/app/api/lobbies/[code]/pieces/route";
 
 describe("Production Serverless Flow & Error Handling", () => {
   it("verifies Supabase credentials are configured in test environment", () => {
@@ -188,4 +189,37 @@ describe("Production Serverless Flow & Error Handling", () => {
     if (liveLobby.timerInterval) clearInterval(liveLobby.timerInterval);
     if (liveLobby.endTimeout) clearTimeout(liveLobby.endTimeout);
   });
+
+  it("delivers all 16 WebP pieces in a single fast batch request via /api/lobbies/[code]/pieces", async () => {
+    const lobby = await lobbyService.createLobby();
+    const { player } = await lobbyService.join(lobby.code, "BatchTester");
+    await gameService.startGame(lobby.code, lobby.hostToken);
+
+    const liveLobby = (lobbyRepo as any).processLobbies?.get(lobby.code);
+
+    // 1. Call batch pieces endpoint during MEMORY phase (background preloading)
+    const batchReq = new Request(
+      `http://localhost:3000/api/lobbies/${lobby.code}/pieces?p=${player.id}&t=${player.token}`,
+    );
+    const batchRes = await piecesBatchRouteGET(batchReq, {
+      params: Promise.resolve({ code: lobby.code }),
+    });
+
+    expect(batchRes.status).toBe(200);
+    const body = await batchRes.json();
+    expect(body.ok).toBe(true);
+    expect(body.slug).toBeTruthy();
+    expect(body.pieces).toBeTruthy();
+    expect(Object.keys(body.pieces).length).toBe(16);
+
+    for (let i = 0; i < 16; i++) {
+      expect(body.pieces[i]).toMatch(/^data:image\/webp;base64,/);
+      expect(body.pieces[i].length).toBeGreaterThan(200);
+    }
+
+    // Clean up
+    if (liveLobby.timerInterval) clearInterval(liveLobby.timerInterval);
+    if (liveLobby.endTimeout) clearTimeout(liveLobby.endTimeout);
+  });
 });
+
