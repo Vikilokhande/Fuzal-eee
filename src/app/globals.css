@@ -246,4 +246,12 @@ body {
 .no-select {
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.no-drag {
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }

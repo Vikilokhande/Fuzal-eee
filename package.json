@@ -7,7 +7,7 @@
     "start": "next start",
     "seed": "npx tsx scripts/seed-puzzles.ts",
     "lint": "eslint .",
-    "test": "vitest run src/lib/game/__tests__/puzzle.test.ts && vitest run src/lib/game/__tests__/supabase-storage.test.ts && vitest run src/lib/game/__tests__/production-flow.test.ts",
+    "test": "vitest run src/lib/game/__tests__/puzzle.test.ts && vitest run src/lib/game/__tests__/puzzle-interaction.test.ts && vitest run src/lib/game/__tests__/supabase-storage.test.ts && vitest run src/lib/game/__tests__/production-flow.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
