@@ -89,6 +89,28 @@ export default function PlayerGamePage() {
     );
   }
 
+  if (connState === "error" && !state) {
+    return (
+      <Center>
+        <div className="glass max-w-sm p-8 text-center">
+          <div className="text-6xl">⚠️</div>
+          <h2 className="mt-3 font-display text-2xl font-bold text-white">Connection Failed</h2>
+          <p className="mt-2 text-indigo-100/70">
+            Unable to connect to game lobby <strong>{code}</strong>. The lobby may have ended or the server is unreachable.
+          </p>
+          <div className="mt-6 flex flex-col gap-3">
+            <button className="btn-primary w-full" onClick={() => window.location.reload()}>
+              Retry Connection
+            </button>
+            <button className="btn-secondary w-full" onClick={() => router.push(`/join/${code}`)}>
+              Back to Join
+            </button>
+          </div>
+        </div>
+      </Center>
+    );
+  }
+
   if (!session || !state) {
     return (
       <Center>

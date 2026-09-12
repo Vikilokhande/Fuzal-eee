@@ -545,10 +545,12 @@ export const gameService = {
           ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt }, lobby.id),
         );
       }, 1000);
+      (lobby.timerInterval as any)?.unref?.();
 
       lobby.endTimeout = setTimeout(() => {
         void gameService.beginPuzzle(code).catch((e) => console.error("beginPuzzle", e));
       }, durationSeconds * 1000 + 60);
+      (lobby.endTimeout as any)?.unref?.();
     });
   },
 

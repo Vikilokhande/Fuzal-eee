@@ -58,6 +58,28 @@ export default function HostPage() {
     );
   }
 
+  if (connState === "error" && !state) {
+    return (
+      <main className="grid min-h-screen place-items-center px-6 text-center">
+        <div className="glass max-w-md p-8">
+          <div className="text-6xl">⚠️</div>
+          <h1 className="mt-3 font-display text-2xl font-bold text-white">Lobby Connection Failed</h1>
+          <p className="mt-2 text-indigo-100/70">
+            Unable to connect to game lobby <strong>{code}</strong>. The lobby may have expired or the database server is unreachable.
+          </p>
+          <div className="mt-6 flex flex-col gap-3">
+            <button className="btn-primary w-full" onClick={() => window.location.reload()}>
+              Retry Connection
+            </button>
+            <button className="btn-secondary w-full" onClick={() => router.push("/")}>
+              Back to Home
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   if (!token || !state) {
     return (
       <main className="grid min-h-screen place-items-center">

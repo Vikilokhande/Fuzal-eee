@@ -10,7 +10,7 @@
  * Preserves the `LobbyRepository` interface and per-lobby in-process mutexes
  * while persisting all authoritative game state in Supabase.
  */
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
 import { imageService } from "./imageService";
 import { correctSlots } from "./puzzle";
 import {
@@ -37,6 +37,17 @@ export class SupabaseLobbyRepository implements LobbyRepository {
     const code = lobby.code.toUpperCase();
     this.processLobbies.set(code, lobby);
 
+    if (!isSupabaseConfigured()) {
+      console.error(
+        `[REPO_CONFIG_ERROR] Cannot put lobby ${code}: Supabase environment variables are missing.`,
+      );
+      throw new GameError(
+        "INTERNAL_ERROR",
+        "Supabase database is not configured. Please ensure NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set in Vercel environment variables and redeploy.",
+        503,
+      );
+    }
+
     try {
       // 1. Upsert lobby row
       const { data: lobbyRow, error: lobbyErr } = await supabaseAdmin
@@ -56,10 +67,18 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         .single();
 
       if (lobbyErr) {
-        console.error(`[REPO_ERROR] Failed to upsert lobby ${code}:`, lobbyErr.message);
+        console.error(`[REPO_ERROR] Failed to upsert lobby ${code}:`, {
+          name: lobbyErr.name,
+          message: lobbyErr.message,
+          code: lobbyErr.code,
+          details: lobbyErr.details,
+          hint: lobbyErr.hint,
+          operation: "upsert_lobby",
+          lobbyCode: code,
+        });
         throw new GameError(
           "INTERNAL_ERROR",
-          `Database error: ${lobbyErr.message}. Check that Supabase environment variables are configured.`,
+          `Database error: ${lobbyErr.message}. Ensure Supabase is reachable.`,
           500,
         );
       }
@@ -141,8 +160,21 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           }
         }
       }
-    } catch (err) {
-      console.error(`[REPO_ERROR] Unexpected error in put(${code}):`, err);
+    } catch (err: any) {
+      if (err instanceof GameError) throw err;
+      console.error(`[REPO_ERROR] Unexpected error in put(${code}):`, {
+        name: err?.name,
+        message: err?.message,
+        causeMessage: err?.cause?.message,
+        causeCode: err?.cause?.code,
+        operation: "put_lobby",
+        lobbyCode: code,
+      });
+      throw new GameError(
+        "INTERNAL_ERROR",
+        `Failed to persist lobby ${code} to database: ${err?.message ?? "Network error"}.`,
+        500,
+      );
     }
 
     return lobby;
@@ -150,6 +182,11 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
   async getByCode(code: string): Promise<Lobby | null> {
     const normCode = code.toUpperCase();
+
+    if (!isSupabaseConfigured()) {
+      console.error(`[REPO_CONFIG_ERROR] Cannot get lobby ${normCode}: Supabase credentials not configured.`);
+      return null;
+    }
 
     try {
       // 1. Fetch lobby from Supabase
@@ -159,7 +196,19 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         .eq("code", normCode)
         .maybeSingle();
 
-      if (lobbyErr || !lobbyRow) {
+      if (lobbyErr) {
+        console.error(`[REPO_ERROR] Failed to fetch lobby ${normCode}:`, {
+          name: lobbyErr.name,
+          message: lobbyErr.message,
+          code: lobbyErr.code,
+          details: lobbyErr.details,
+          hint: lobbyErr.hint,
+          operation: "getByCode_lobby",
+          lobbyCode: normCode,
+        });
+        return null;
+      }
+      if (!lobbyRow) {
         return null;
       }
 
@@ -319,9 +368,16 @@ export class SupabaseLobbyRepository implements LobbyRepository {
       }
 
       return lobby;
-    } catch (err) {
-      console.error(`[REPO_ERROR] Unexpected error in getByCode(${normCode}):`, err);
-      return this.processLobbies.get(normCode) ?? null;
+    } catch (err: any) {
+      console.error(`[REPO_ERROR] Unexpected error in getByCode(${normCode}):`, {
+        name: err?.name,
+        message: err?.message,
+        causeMessage: err?.cause?.message,
+        causeCode: err?.cause?.code,
+        operation: "getByCode_lobby",
+        lobbyCode: normCode,
+      });
+      return null;
     }
   }
 

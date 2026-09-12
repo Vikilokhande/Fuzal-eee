@@ -6,7 +6,7 @@
  */
 import type { GameEvent } from "@/lib/game/types";
 
-export type ConnectionState = "connecting" | "open" | "reconnecting";
+export type ConnectionState = "connecting" | "open" | "reconnecting" | "error";
 
 export interface SocketOptions {
   code: string;
@@ -40,7 +40,9 @@ export class FuzalSocket {
       params.set("t", this.opts.playerToken);
     }
     const url = `/api/lobbies/${this.opts.code}/events?${params.toString()}`;
-    this.opts.onStateChange?.(this.retries === 0 ? "connecting" : "reconnecting");
+    this.opts.onStateChange?.(
+      this.retries === 0 ? "connecting" : this.retries >= 5 ? "error" : "reconnecting",
+    );
     const es = new EventSource(url);
     this.es = es;
 
@@ -63,10 +65,20 @@ export class FuzalSocket {
       es.close();
       if (this.closedByUser) return;
       this.retries += 1;
-      this.opts.onStateChange?.("reconnecting");
+      if (this.retries >= 5) {
+        this.opts.onStateChange?.("error");
+      } else {
+        this.opts.onStateChange?.("reconnecting");
+      }
       const delay = Math.min(800 * 2 ** Math.min(this.retries, 5), 8000);
       this.reconnectTimer = setTimeout(() => this.open(), delay);
     };
+  }
+
+  retry() {
+    this.retries = 0;
+    this.disconnect();
+    this.connect();
   }
 
   disconnect() {
