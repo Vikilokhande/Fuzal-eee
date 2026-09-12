@@ -40,8 +40,10 @@ class EventType(str, enum.Enum):
     MEMORY_PHASE_STARTED = "MEMORY_PHASE_STARTED"
     MEMORY_TIMER_UPDATED = "MEMORY_TIMER_UPDATED"
     PUZZLE_STARTED = "PUZZLE_STARTED"
+    PUZZLE_TIMER_UPDATED = "PUZZLE_TIMER_UPDATED"
     PUZZLE_MOVE = "PUZZLE_MOVE"
     PLAYER_COMPLETED = "PLAYER_COMPLETED"
+    PLAYER_ELIMINATED = "PLAYER_ELIMINATED"
     GAME_FINISHED = "GAME_FINISHED"
     NEW_GAME = "NEW_GAME"
 
@@ -53,6 +55,7 @@ class PuzzleInstance:
     started_at: float = 0.0
     completed: bool = False
     completed_at: Optional[float] = None
+    eliminated: bool = False
 
 
 @dataclass
@@ -61,10 +64,11 @@ class Player:
     name: str
     token: str
     joined_at: float
-    slot: int
+    slot: int = 0
     connection_status: PlayerConnection = PlayerConnection.CONNECTED
     score: int = 0
     puzzle: Optional[PuzzleInstance] = None
+    eliminated: bool = False
 
 
 @dataclass

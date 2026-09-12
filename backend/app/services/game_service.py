@@ -115,6 +115,7 @@ class GameService:
             "connected": p.connection_status == PlayerConnection.CONNECTED,
             "score": p.score,
             "slot": p.slot,
+            "eliminated": getattr(p, "eliminated", False),
         }
 
     def _progress(self, p: Player) -> dict:
@@ -124,6 +125,7 @@ class GameService:
             "moves": p.puzzle.moves if p.puzzle else 0,
             "correctCount": sum(correct_slots(board)),
             "completed": bool(p.puzzle and p.puzzle.completed),
+            "eliminated": getattr(p, "eliminated", False) or bool(p.puzzle and getattr(p.puzzle, "eliminated", False)),
         }
 
     def public_view(self, lobby: Lobby) -> dict:
@@ -438,6 +440,55 @@ class GameService:
                 }, lobby.id),
             )
 
+    async def _puzzle_loop(self, code: str, ends_at: int) -> None:
+        try:
+            while True:
+                remaining = max(0, -(-(ends_at - now_ms()) // 1000))  # ceil
+                await manager.broadcast(
+                    code,
+                    event(
+                        EventType.PUZZLE_TIMER_UPDATED,
+                        {"remaining": remaining, "endsAt": ends_at, "durationSeconds": settings.puzzle_seconds},
+                    ),
+                )
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(1.0, (ends_at - now_ms()) / 1000))
+            await self._handle_puzzle_timeout(code)
+        except asyncio.CancelledError:
+            pass
+
+    async def _handle_puzzle_timeout(self, code: str) -> None:
+        lobby = self.get(code)
+        async with self._lock(lobby):
+            if lobby.status != GameState.PUZZLE:
+                return
+            self._cancel_timers(lobby)
+            for p in lobby.players:
+                if not (p.puzzle and p.puzzle.completed):
+                    p.eliminated = True
+                    if p.puzzle:
+                        p.puzzle.eliminated = True
+                    await manager.send_to_player(
+                        code,
+                        p.id,
+                        event(
+                            EventType.PLAYER_ELIMINATED,
+                            {
+                                "playerId": p.id,
+                                "reason": "TIME_EXPIRED",
+                                "message": "Time's up! You were eliminated.",
+                            },
+                            lobby.id,
+                        ),
+                    )
+            lobby.status = GameState.FINISHED
+            lobby.winner_id = None
+            lobby.finished_at = now_ms()
+            await manager.broadcast(
+                code, event(EventType.GAME_FINISHED, self._result(lobby), lobby.id)
+            )
+
     async def begin_puzzle(self, code: str) -> None:
         lobby = self.get(code)
         async with self._lock(lobby):
@@ -453,11 +504,20 @@ class GameService:
                 p.puzzle = PuzzleInstance(
                     board=generate_shuffled_board(total),
                     started_at=lobby.puzzle_started_at,
+                    eliminated=False,
                 )
+                p.eliminated = False
+            duration = settings.puzzle_seconds
+            ends_at = lobby.puzzle_started_at + duration * 1000
+            task = asyncio.create_task(self._puzzle_loop(lobby.code, ends_at))
+            lobby.timer_tasks["puzzle"] = task
+
             await manager.broadcast(
                 code,
                 event(EventType.PUZZLE_STARTED, {
                     "startedAt": lobby.puzzle_started_at,
+                    "endsAt": ends_at,
+                    "durationSeconds": duration,
                     "gridCols": lobby.grid_cols,
                     "gridRows": lobby.grid_rows,
                     "players": [self._progress(p) for p in lobby.players],
@@ -469,6 +529,8 @@ class GameService:
                     event(EventType.PUZZLE_STARTED, {
                         "board": list(p.puzzle.board), "moves": 0,
                         "startedAt": lobby.puzzle_started_at,
+                        "endsAt": ends_at,
+                        "durationSeconds": duration,
                         "gridCols": lobby.grid_cols, "gridRows": lobby.grid_rows,
                     }, lobby.id),
                 )

@@ -32,22 +32,46 @@ export function WinnerScreen({
 
       <div className="animate-slide-up glass flex w-full max-w-2xl flex-col items-center gap-5 px-8 py-12 text-center">
         {isHost ? (
-          <>
-            <div className="animate-winner-glow text-8xl">🏆</div>
-            <p className="font-display text-2xl font-bold uppercase tracking-[0.4em] text-cyan-300">
-              Winner
-            </p>
-            <h2 className="font-display text-6xl font-bold neon-text md:text-7xl">
-              {winner?.name ?? "—"}
-            </h2>
-            <p className="text-xl text-indigo-100/80">Congratulations! 🎉</p>
-          </>
+          winner ? (
+            <>
+              <div className="animate-winner-glow text-8xl">🏆</div>
+              <p className="font-display text-2xl font-bold uppercase tracking-[0.4em] text-cyan-300">
+                Winner
+              </p>
+              <h2 className="font-display text-6xl font-bold neon-text md:text-7xl">
+                {winner.name}
+              </h2>
+              <p className="text-xl text-indigo-100/80">Congratulations! 🎉</p>
+            </>
+          ) : (
+            <>
+              <div className="text-8xl">⌛</div>
+              <p className="font-display text-2xl font-bold uppercase tracking-[0.4em] text-rose-400">
+                Time Expired
+              </p>
+              <h2 className="font-display text-5xl font-bold text-white md:text-6xl">
+                No Winner
+              </h2>
+              <p className="text-xl text-indigo-100/80">
+                The 3-minute limit expired before any player solved the puzzle.
+              </p>
+            </>
+          )
         ) : youWon ? (
           <>
             <div className="animate-winner-glow text-8xl">🏆</div>
             <h2 className="font-display text-6xl font-bold neon-text">YOU WON!</h2>
             <p className="text-xl text-indigo-100/80">
               Lightning fingers, {winner?.name}!
+            </p>
+          </>
+        ) : !winner || result.timeExpired ? (
+          <>
+            <div className="animate-bounce text-8xl">⏰</div>
+            <h2 className="font-display text-5xl font-bold text-rose-400">Time&apos;s Up!</h2>
+            <p className="text-xl font-bold text-white">You were eliminated</p>
+            <p className="text-lg text-indigo-100/70">
+              The 3-minute time limit expired before the puzzle was completed.
             </p>
           </>
         ) : (
@@ -63,10 +87,10 @@ export function WinnerScreen({
 
         <div className="mt-2 rounded-2xl border border-white/10 bg-black/30 px-8 py-4">
           <p className="text-xs font-semibold uppercase tracking-[0.3em] text-indigo-200/70">
-            Puzzle Time
+            {winner ? "Winning Time" : "Round Duration"}
           </p>
           <p className="font-display text-5xl font-bold text-emerald-300">
-            {formatClock(result.durationMs ?? 0)}
+            {formatClock(result.durationMs ?? (result.timeExpired ? 180000 : 0))}
           </p>
         </div>
 
@@ -106,11 +130,15 @@ export function WinnerScreen({
                 <span className="font-mono text-sm text-indigo-200/80">
                   {s.correctCount} pts
                 </span>
-                {s.completed && (
+                {s.completed ? (
                   <span className="font-mono text-sm text-emerald-300">
                     {formatClock(s.durationMs ?? 0)}
                   </span>
-                )}
+                ) : s.eliminated ? (
+                  <span className="rounded-full bg-rose-500/20 px-2.5 py-0.5 text-xs font-bold text-rose-300">
+                    ELIMINATED
+                  </span>
+                ) : null}
               </div>
             ))}
           </div>

@@ -46,6 +46,7 @@ export interface PuzzleInstance {
   startedAt: number;
   completed: boolean;
   completedAt: number | null;
+  eliminated?: boolean;
 }
 
 export interface Player {
@@ -57,6 +58,7 @@ export interface Player {
   score: number;
   slot: number;
   puzzle: PuzzleInstance | null;
+  eliminated?: boolean;
 }
 
 export interface ImageMeta {
@@ -85,6 +87,8 @@ export interface Lobby {
   currentGameId?: string | null;
   memory: MemoryPhase | null;
   puzzleStartedAt: number | null;
+  puzzleEndsAt?: number | null;
+  puzzleDurationSeconds?: number;
   winnerId: string | null;
   finishedAt: number | null;
   /** per-lobby async mutex (chained promises) – guarantees atomic winner */
@@ -111,8 +115,10 @@ export const EventType = {
   MEMORY_PHASE_STARTED: "MEMORY_PHASE_STARTED",
   MEMORY_TIMER_UPDATED: "MEMORY_TIMER_UPDATED",
   PUZZLE_STARTED: "PUZZLE_STARTED",
+  PUZZLE_TIMER_UPDATED: "PUZZLE_TIMER_UPDATED",
   PUZZLE_MOVE: "PUZZLE_MOVE",
   PLAYER_COMPLETED: "PLAYER_COMPLETED",
+  PLAYER_ELIMINATED: "PLAYER_ELIMINATED",
   GAME_FINISHED: "GAME_FINISHED",
   NEW_GAME: "NEW_GAME",
 } as const;

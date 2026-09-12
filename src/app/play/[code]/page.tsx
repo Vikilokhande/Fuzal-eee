@@ -59,6 +59,8 @@ export default function PlayerGamePage() {
     goFlash,
     memorySeconds,
     puzzleElapsedMs,
+    puzzleRemainingMs,
+    isEliminated,
     pieceSrcs,
     piecesLoading,
     piecesError,
@@ -221,10 +223,16 @@ export default function PlayerGamePage() {
               <div className="flex w-full max-w-[min(94vw,560px)] items-center justify-between rounded-2xl bg-white/5 px-5 py-3">
                 <div>
                   <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-indigo-200/70">
-                    Time
+                    Time Left
                   </p>
-                  <p className="font-display text-2xl font-bold text-cyan-300">
-                    {formatClock(puzzleElapsedMs)}
+                  <p
+                    className={`font-display text-2xl font-bold tabular-nums ${
+                      puzzleRemainingMs <= 30000
+                        ? "animate-pulse text-rose-400"
+                        : "text-cyan-300"
+                    }`}
+                  >
+                    {formatClock(puzzleRemainingMs)}
                   </p>
                 </div>
                 <div className="text-center">
@@ -243,7 +251,30 @@ export default function PlayerGamePage() {
                 </div>
               </div>
 
-              {state.puzzle ? (
+              {isEliminated ? (
+                <div className="glass flex w-full max-w-[min(94vw,560px)] flex-col items-center justify-center gap-5 rounded-2xl p-8 text-center shadow-2xl ring-1 ring-rose-500/40">
+                  <div className="animate-bounce text-6xl">⏰</div>
+                  <div>
+                    <h3 className="font-display text-3xl font-bold text-rose-400">
+                      Time&apos;s Up!
+                    </h3>
+                    <p className="mt-1 font-display text-lg font-bold text-white">
+                      You were eliminated
+                    </p>
+                  </div>
+                  <p className="max-w-xs text-sm text-indigo-100/70">
+                    The 3-minute time limit expired before you solved the puzzle.
+                  </p>
+                  <div className="rounded-xl border border-white/10 bg-black/40 px-5 py-3">
+                    <p className="text-xs uppercase tracking-wider text-indigo-200/60">
+                      Correct Pieces
+                    </p>
+                    <p className="font-display text-2xl font-bold text-emerald-400">
+                      {state.puzzle ? state.puzzle.correctSlots.filter(Boolean).length : 0} / {totalPieces}
+                    </p>
+                  </div>
+                </div>
+              ) : state.puzzle ? (
                 <PuzzleBoard
                   board={state.puzzle.board}
                   cols={state.gridCols}

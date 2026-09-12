@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     max_players: int = 5
     memory_seconds: int = 30
+    puzzle_seconds: int = 180
     grid_cols: int = 4
     grid_rows: int = 4
     disconnect_grace_ms: int = 8000

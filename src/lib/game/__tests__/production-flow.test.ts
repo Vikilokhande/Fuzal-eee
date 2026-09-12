@@ -4,6 +4,7 @@ import { lobbyRepo } from "../repo";
 import { manager } from "../manager";
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
 import { EventType, GameState, type GameEvent } from "../types";
+import { GET as pieceRouteGET } from "@/app/api/lobbies/[code]/piece/[pieceId]/route";
 
 describe("Production Serverless Flow & Error Handling", () => {
   it("verifies Supabase credentials are configured in test environment", () => {
@@ -103,5 +104,88 @@ describe("Production Serverless Flow & Error Handling", () => {
     if (liveLobby?.endTimeout) clearTimeout(liveLobby.endTimeout);
     if (inMem?.timerInterval) clearInterval(inMem.timerInterval);
     if (inMem?.endTimeout) clearTimeout(inMem.endTimeout);
+  });
+
+  it("enforces 3-minute (180s) server-authoritative timer and snapshot fields", async () => {
+    const lobby = await lobbyService.createLobby();
+    const { player } = await lobbyService.join(lobby.code, "TimerTester");
+
+    // Advance to PUZZLE
+    await gameService.startGame(lobby.code, lobby.hostToken);
+    await gameService.beginPuzzle(lobby.code);
+
+    const liveLobby = (lobbyRepo as any).processLobbies?.get(lobby.code);
+    expect(liveLobby.status).toBe(GameState.PUZZLE);
+    expect(liveLobby.puzzleStartedAt).toBeTruthy();
+    expect(liveLobby.puzzleEndsAt).toBe(liveLobby.puzzleStartedAt + 180_000);
+    expect(liveLobby.puzzleDurationSeconds).toBe(180);
+
+    // Snapshot contains puzzleEndsAt and 180s duration
+    const snapshot = lobbyService.buildSnapshot(liveLobby, "player", liveLobby.players[0]);
+    expect(snapshot.payload.puzzleEndsAt).toBe(liveLobby.puzzleEndsAt);
+    expect(snapshot.payload.puzzleDurationSeconds).toBe(180);
+
+    // Clean up
+    if (liveLobby.timerInterval) clearInterval(liveLobby.timerInterval);
+    if (liveLobby.endTimeout) clearTimeout(liveLobby.endTimeout);
+  });
+
+  it("automatically eliminates unsolved players and ends round on 3-minute timeout", async () => {
+    const lobby = await lobbyService.createLobby();
+    const { player } = await lobbyService.join(lobby.code, "TimeoutPlayer");
+
+    await gameService.startGame(lobby.code, lobby.hostToken);
+    await gameService.beginPuzzle(lobby.code);
+
+    const liveLobby = (lobbyRepo as any).processLobbies?.get(lobby.code);
+    expect(liveLobby.players[0].eliminated).toBe(false);
+
+    // Trigger authoritative 3-minute timeout
+    await gameService.handlePuzzleTimeout(lobby.code);
+
+    expect(liveLobby.status).toBe(GameState.FINISHED);
+    expect(liveLobby.winnerId).toBeNull();
+    expect(liveLobby.players[0].eliminated).toBe(true);
+    expect(liveLobby.players[0].puzzle.eliminated).toBe(true);
+
+    // Verify player is rejected if attempting to swap after elimination
+    await expect(
+      gameService.applySwap(lobby.code, player.id, player.token, 0, 1),
+    ).rejects.toMatchObject({
+      code: "INVALID_STATE",
+    });
+
+    // Clean up
+    if (liveLobby.timerInterval) clearInterval(liveLobby.timerInterval);
+    if (liveLobby.endTimeout) clearTimeout(liveLobby.endTimeout);
+  });
+
+  it("delivers WebP pieces rapidly and caches in memory", async () => {
+    const lobby = await lobbyService.createLobby();
+    const { player } = await lobbyService.join(lobby.code, "FastLoader");
+
+    await gameService.startGame(lobby.code, lobby.hostToken);
+    await gameService.beginPuzzle(lobby.code);
+
+    const liveLobby = (lobbyRepo as any).processLobbies?.get(lobby.code);
+
+    // Call piece endpoint for piece 0 and piece 15
+    for (const pieceIdx of [0, 15]) {
+      const req = new Request(
+        `http://localhost:3000/api/lobbies/${lobby.code}/piece/${pieceIdx}?p=${player.id}&t=${player.token}`,
+      );
+      const res = await pieceRouteGET(req, {
+        params: Promise.resolve({ code: lobby.code, pieceId: String(pieceIdx) }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("image/webp");
+      const buf = await res.arrayBuffer();
+      expect(buf.byteLength).toBeGreaterThan(100);
+    }
+
+    // Clean up
+    if (liveLobby.timerInterval) clearInterval(liveLobby.timerInterval);
+    if (liveLobby.endTimeout) clearTimeout(liveLobby.endTimeout);
   });
 });

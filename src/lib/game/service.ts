@@ -93,6 +93,7 @@ export function publicPlayer(p: Player) {
     connected: p.connectionStatus === PlayerConnection.CONNECTED,
     score: p.score,
     slot: p.slot,
+    eliminated: p.eliminated ?? false,
   };
 }
 
@@ -102,6 +103,7 @@ function playerProgress(p: Player) {
     moves: p.puzzle?.moves ?? 0,
     correctCount: p.puzzle ? correctSlots(p.puzzle.board).filter(Boolean).length : 0,
     completed: p.puzzle?.completed ?? false,
+    eliminated: p.eliminated ?? p.puzzle?.eliminated ?? false,
   };
 }
 
@@ -367,6 +369,11 @@ export const lobbyService = {
         image: null as null | { id: string; url: string; name: string },
         imageName: null as string | null,
         puzzle: null as null | Record<string, unknown>,
+        puzzleStartedAt: lobby.puzzleStartedAt,
+        puzzleEndsAt:
+          lobby.puzzleEndsAt ??
+          (lobby.puzzleStartedAt ? lobby.puzzleStartedAt + config.puzzleSeconds * 1000 : null),
+        puzzleDurationSeconds: lobby.puzzleDurationSeconds ?? config.puzzleSeconds,
         puzzleProgress: null as null | ReturnType<typeof playerProgress>[],
         result: null as null | Record<string, unknown>,
       },
@@ -390,6 +397,7 @@ export const lobbyService = {
           moves: you.puzzle.moves,
           startedAt: you.puzzle.startedAt,
           correctSlots: correctSlots(you.puzzle.board),
+          eliminated: you.eliminated ?? you.puzzle.eliminated ?? false,
         };
       }
     }
@@ -402,6 +410,7 @@ export const lobbyService = {
           moves: you.puzzle.moves,
           startedAt: you.puzzle.startedAt,
           correctSlots: correctSlots(you.puzzle.board),
+          eliminated: you.eliminated ?? you.puzzle.eliminated ?? false,
         };
       }
       p.result = resultPayload(lobby);
@@ -417,6 +426,10 @@ export const lobbyService = {
 function resultPayload(lobby: Lobby) {
   const winner = lobby.players.find((p) => p.id === lobby.winnerId) ?? null;
   const startedAt = lobby.puzzleStartedAt ?? Date.now();
+  const timeExpired =
+    !winner &&
+    !!lobby.puzzleEndsAt &&
+    (lobby.finishedAt ?? Date.now()) >= lobby.puzzleEndsAt;
   const standings = lobby.players
     .map((p) => ({
       ...publicPlayer(p),
@@ -425,6 +438,7 @@ function resultPayload(lobby: Lobby) {
         ? correctSlots(p.puzzle.board).filter(Boolean).length
         : 0,
       completed: p.puzzle?.completed ?? false,
+      eliminated: p.eliminated ?? (!p.puzzle?.completed && (!winner || timeExpired)),
       durationMs: p.puzzle?.completedAt ? p.puzzle.completedAt - startedAt : null,
     }))
     .sort((a, b) => {
@@ -434,6 +448,7 @@ function resultPayload(lobby: Lobby) {
     });
   return {
     winner: winner ? publicPlayer(winner) : null,
+    timeExpired,
     finishedAt: lobby.finishedAt,
     durationMs:
       lobby.finishedAt && lobby.puzzleStartedAt
@@ -560,13 +575,16 @@ export const gameService = {
     await withLobbyLock(lobby, async () => {
       if (lobby.status === GameState.PUZZLE) return; // idempotent re-entry
       assertTransition(lobby, GameState.PUZZLE);
-      if (lobby.timerInterval) clearInterval(lobby.timerInterval);
-      if (lobby.endTimeout) clearTimeout(lobby.endTimeout);
-      lobby.timerInterval = null;
-      lobby.endTimeout = null;
+      clearLobbyTimers(lobby);
+
+      const durationSeconds = config.puzzleSeconds; // exactly 180s (3 minutes)
+      const startedAt = Date.now();
+      const endsAt = startedAt + durationSeconds * 1000;
 
       lobby.status = GameState.PUZZLE;
-      lobby.puzzleStartedAt = Date.now();
+      lobby.puzzleStartedAt = startedAt;
+      lobby.puzzleEndsAt = endsAt;
+      lobby.puzzleDurationSeconds = durationSeconds;
       const total = lobby.gridCols * lobby.gridRows;
       for (const p of lobby.players) {
         // Every player receives an independent shuffle.
@@ -576,7 +594,9 @@ export const gameService = {
           startedAt: lobby.puzzleStartedAt,
           completed: false,
           completedAt: null,
+          eliminated: false,
         };
+        p.eliminated = false;
       }
       await lobbyRepo.put(lobby);
 
@@ -585,7 +605,9 @@ export const gameService = {
         ev(
           EventType.PUZZLE_STARTED,
           {
-            startedAt: lobby.puzzleStartedAt,
+            startedAt,
+            endsAt,
+            durationSeconds,
             gridCols: lobby.gridCols,
             gridRows: lobby.gridRows,
             players: lobby.players.map(playerProgress),
@@ -605,7 +627,9 @@ export const gameService = {
             {
               board: pz.board,
               moves: 0,
-              startedAt: lobby.puzzleStartedAt,
+              startedAt,
+              endsAt,
+              durationSeconds,
               gridCols: lobby.gridCols,
               gridRows: lobby.gridRows,
             },
@@ -613,6 +637,65 @@ export const gameService = {
           ),
         );
       }
+
+      // Authoritative 3-minute countdown clock: tick every second
+      lobby.timerInterval = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+        manager.broadcast(
+          code,
+          ev(EventType.PUZZLE_TIMER_UPDATED, { remaining, endsAt, durationSeconds }, lobby.id),
+        );
+      }, 1000);
+      (lobby.timerInterval as any)?.unref?.();
+
+      // Hard server timeout after exactly 3 minutes: eliminates unsolved players
+      lobby.endTimeout = setTimeout(() => {
+        void gameService.handlePuzzleTimeout(code).catch((e) => console.error("puzzleTimeout", e));
+      }, durationSeconds * 1000 + 100);
+      (lobby.endTimeout as any)?.unref?.();
+    });
+  },
+
+  /** Authoritative 3-minute expiration: eliminates unsolved players and ends round */
+  async handlePuzzleTimeout(code: string): Promise<void> {
+    const lobby = await lobbyService.getLobby(code);
+    await withLobbyLock(lobby, async () => {
+      if (lobby.status !== GameState.PUZZLE) return;
+
+      clearLobbyTimers(lobby);
+
+      // Eliminate all players whose puzzle is not completed
+      for (const p of lobby.players) {
+        if (!p.puzzle?.completed) {
+          p.eliminated = true;
+          if (p.puzzle) p.puzzle.eliminated = true;
+          manager.sendToPlayer(
+            code,
+            p.id,
+            ev(
+              EventType.PLAYER_ELIMINATED,
+              {
+                playerId: p.id,
+                reason: "TIME_EXPIRED",
+                message: "Time's up! You were eliminated because the 3-minute limit expired.",
+              },
+              lobby.id,
+            ),
+          );
+        }
+      }
+
+      assertTransition(lobby, GameState.FINISHED);
+      lobby.status = GameState.FINISHED;
+      lobby.winnerId = null; // No winner if 3 minutes expire without solution
+      lobby.finishedAt = Date.now();
+
+      await lobbyRepo.put(lobby);
+
+      manager.broadcast(
+        lobby.code,
+        ev(EventType.GAME_FINISHED, resultPayload(lobby), lobby.id),
+      );
     });
   },
 
@@ -636,6 +719,14 @@ export const gameService = {
       }
       if (lobby.status !== GameState.PUZZLE) {
         throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
+      }
+      if (player.eliminated || player.puzzle?.eliminated) {
+        throw new GameError("FORBIDDEN", "You have been eliminated.", 403);
+      }
+      if (lobby.puzzleEndsAt && Date.now() > lobby.puzzleEndsAt) {
+        player.eliminated = true;
+        if (player.puzzle) player.puzzle.eliminated = true;
+        throw new GameError("TIME_EXPIRED", "3-minute time limit has expired. You are eliminated.", 400);
       }
       const puzzle = player.puzzle;
       if (!puzzle || puzzle.completed) {
@@ -747,7 +838,10 @@ export const gameService = {
       assertHost(lobby, hostToken);
       assertTransition(lobby, GameState.MEMORY);
       clearLobbyTimers(lobby);
-      for (const p of lobby.players) p.puzzle = null;
+      for (const p of lobby.players) {
+        p.puzzle = null;
+        p.eliminated = false;
+      }
       const image = imageService.getRandomImage(lobby.usedImageIds);
       lobby.usedImageIds.push(image.id);
       const durationSeconds = config.memorySeconds;
@@ -758,6 +852,8 @@ export const gameService = {
       lobby.winnerId = null;
       lobby.finishedAt = null;
       lobby.puzzleStartedAt = null;
+      lobby.puzzleEndsAt = null;
+      lobby.puzzleDurationSeconds = undefined;
 
       // Create a fresh game round record in Supabase for the new round
       try {
@@ -838,10 +934,15 @@ export const gameService = {
       lobby.status = GameState.LOBBY;
       lobby.memory = null;
       lobby.puzzleStartedAt = null;
+      lobby.puzzleEndsAt = null;
+      lobby.puzzleDurationSeconds = undefined;
       lobby.winnerId = null;
       lobby.finishedAt = null;
       lobby.currentGameId = null;
-      for (const p of lobby.players) p.puzzle = null;
+      for (const p of lobby.players) {
+        p.puzzle = null;
+        p.eliminated = false;
+      }
       await lobbyRepo.put(lobby);
       manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));
       manager.broadcast(

@@ -17,10 +17,12 @@ export interface ProgressView extends PlayerView {
   moves: number;
   correctCount: number;
   completed: boolean;
+  eliminated?: boolean;
   durationMs?: number | null;
 }
 export interface ResultView {
   winner: PlayerView | null;
+  timeExpired?: boolean;
   finishedAt: number | null;
   durationMs: number | null;
   image: { id: string; url: string; name: string } | null;
@@ -45,8 +47,12 @@ export interface ClientState {
     moves: number;
     startedAt: number;
     correctSlots: boolean[];
+    completed?: boolean;
+    eliminated?: boolean;
   } | null;
   puzzleStartedAt: number | null;
+  puzzleEndsAt?: number | null;
+  puzzleDurationSeconds?: number | null;
   puzzleProgress: ProgressView[] | null;
   result: ResultView | null;
 }
@@ -146,6 +152,9 @@ export function useFuzalGame(opts: UseOpts) {
           next.status = "PUZZLE";
           next.memory = null;
           next.puzzleStartedAt = (p.startedAt as number) ?? Date.now();
+          next.puzzleEndsAt =
+            (p.endsAt as number) ?? (next.puzzleStartedAt + 180_000);
+          next.puzzleDurationSeconds = (p.durationSeconds as number) ?? 180;
           if (Array.isArray(p.players)) {
             next.puzzleProgress = p.players as ProgressView[];
           }
@@ -155,9 +164,30 @@ export function useFuzalGame(opts: UseOpts) {
               moves: (p.moves as number) ?? 0,
               startedAt: next.puzzleStartedAt,
               correctSlots: computeCorrect(p.board as number[]),
+              eliminated: false,
             };
             setGoFlash(true);
             setTimeout(() => setGoFlash(false), 950);
+          }
+          break;
+        }
+        case EventType.PUZZLE_TIMER_UPDATED: {
+          if (typeof p.endsAt === "number") {
+            next.puzzleEndsAt = p.endsAt as number;
+          }
+          break;
+        }
+        case EventType.PLAYER_ELIMINATED: {
+          if (p.playerId === opts.playerId) {
+            showToast((p.message as string) ?? "Time's up! You were eliminated.");
+            if (next.puzzle) {
+              next.puzzle = { ...next.puzzle, eliminated: true };
+            }
+          }
+          if (Array.isArray(next.puzzleProgress)) {
+            next.puzzleProgress = next.puzzleProgress.map((pr) =>
+              pr.id === p.playerId ? { ...pr, eliminated: true } : pr,
+            );
           }
           break;
         }
@@ -169,6 +199,7 @@ export function useFuzalGame(opts: UseOpts) {
               moves: (p.moves as number) ?? next.puzzle?.moves ?? 0,
               startedAt: next.puzzle?.startedAt ?? Date.now(),
               correctSlots: computeCorrect(board),
+              eliminated: next.puzzle?.eliminated ?? false,
             };
           }
           if (typeof p.playerId === "string" && Array.isArray(next.puzzleProgress)) {
@@ -207,6 +238,8 @@ export function useFuzalGame(opts: UseOpts) {
           next.image = next.isHost ? next.image : null;
           next.imageName = null;
           next.puzzleStartedAt = null;
+          next.puzzleEndsAt = null;
+          next.puzzleDurationSeconds = null;
           break;
         }
         case EventType.ERROR: {
@@ -267,6 +300,22 @@ export function useFuzalGame(opts: UseOpts) {
     return Math.max(0, end - start);
   })();
 
+  const puzzleRemainingMs = (() => {
+    if (!state) return 0;
+    if (state.status !== "PUZZLE") return 0;
+    const endsAt =
+      state.puzzleEndsAt ??
+      (state.puzzleStartedAt ? state.puzzleStartedAt + 180_000 : null);
+    if (!endsAt) return 180_000;
+    return Math.max(0, endsAt - (Date.now() + clockOffset.current));
+  })();
+
+  const isEliminated = Boolean(
+    (state?.status === "PUZZLE" && puzzleRemainingMs <= 0 && !state.puzzle?.completed) ||
+    state?.puzzle?.eliminated ||
+    (state?.status === "FINISHED" && state.result && !state.result.winner && !state.puzzle?.completed)
+  );
+
   /* ---------------- Actions ---------------- */
 
   const startGame = useCallback(async () => {
@@ -298,7 +347,7 @@ export function useFuzalGame(opts: UseOpts) {
 
   const swap = useCallback(
     async (from: number, to: number) => {
-      if (!opts.playerId || !opts.playerToken || from === to) return;
+      if (!opts.playerId || !opts.playerToken || from === to || isEliminated) return;
       // Optimistic swap for instant touch feedback; server frame is truth.
       setState((prev) => {
         if (!prev?.puzzle) return prev;
@@ -325,7 +374,7 @@ export function useFuzalGame(opts: UseOpts) {
         showToast((e as Error).message);
       }
     },
-    [opts.code, opts.playerId, opts.playerToken, showToast],
+    [opts.code, opts.playerId, opts.playerToken, isEliminated, showToast],
   );
 
   /* ------------- Preload puzzle pieces with retry & validation ------------- */
@@ -353,17 +402,18 @@ export function useFuzalGame(opts: UseOpts) {
         if (cancelled) throw new Error("Cancelled");
         try {
           const url = pieceUrl(opts.code!, pieceId, opts.playerId!, opts.playerToken!);
-          const res = await fetch(url, { cache: "no-cache" });
+          // Allow browser caching of immutable WebP piece tiles
+          const res = await fetch(url);
           if (!res.ok) {
             const errText = await res.text().catch(() => "");
             lastErr = `HTTP ${res.status}: ${errText}`;
-            await new Promise((r) => setTimeout(r, 300 * attempt));
+            await new Promise((r) => setTimeout(r, 150 * attempt));
             continue;
           }
           const cType = res.headers.get("content-type") ?? "";
           if (!cType.includes("image")) {
             lastErr = `Expected image content-type, got: ${cType}`;
-            await new Promise((r) => setTimeout(r, 300 * attempt));
+            await new Promise((r) => setTimeout(r, 150 * attempt));
             continue;
           }
           const blob = await res.blob();
@@ -372,7 +422,7 @@ export function useFuzalGame(opts: UseOpts) {
           return objectUrl;
         } catch (e) {
           lastErr = (e as Error).message;
-          await new Promise((r) => setTimeout(r, 300 * attempt));
+          await new Promise((r) => setTimeout(r, 150 * attempt));
         }
       }
       throw new Error(`Failed to load piece #${pieceId} (${lastErr})`);
@@ -383,9 +433,14 @@ export function useFuzalGame(opts: UseOpts) {
       setPiecesError(null);
 
       try {
-        const results = await Promise.all(
+        // Progressive loading: update state as each piece arrives so counter advances smoothly
+        await Promise.all(
           Array.from({ length: total }, (_, pieceId) =>
-            fetchTileWithRetry(pieceId, 3).then((url) => [pieceId, url] as const),
+            fetchTileWithRetry(pieceId, 3).then((url) => {
+              if (!cancelled) {
+                setPieceSrcs((prev) => ({ ...prev, [pieceId]: url }));
+              }
+            }),
           ),
         );
 
@@ -394,11 +449,6 @@ export function useFuzalGame(opts: UseOpts) {
           return;
         }
 
-        const map: Record<number, string> = {};
-        for (const [id, u] of results) {
-          map[id] = u;
-        }
-        setPieceSrcs(map);
         setPiecesLoading(false);
       } catch (err) {
         if (!cancelled) {
@@ -433,6 +483,8 @@ export function useFuzalGame(opts: UseOpts) {
     serverNow,
     memorySeconds,
     puzzleElapsedMs,
+    puzzleRemainingMs,
+    isEliminated,
     pieceSrcs,
     piecesLoading,
     piecesError,

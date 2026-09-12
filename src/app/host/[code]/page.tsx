@@ -35,7 +35,7 @@ export default function HostPage() {
   }, [code, search]);
 
   const game = useFuzalGame(token ? { code, kind: "host", hostToken: token } : { code, kind: "host" });
-  const { state, connState, toast, memorySeconds, puzzleElapsedMs, actions } = game;
+  const { state, connState, toast, memorySeconds, puzzleElapsedMs, puzzleRemainingMs, actions } = game;
 
   async function newLobby() {
     const lobby = await createLobby();
@@ -218,10 +218,16 @@ export default function HostPage() {
             <Wordmark size={36} />
             <div className="glass flex items-center gap-4 px-7 py-3">
               <p className="text-xs font-bold uppercase tracking-[0.3em] text-indigo-200/70">
-                Elapsed
+                Time Remaining
               </p>
-              <p className="font-display text-4xl font-bold text-cyan-300 tabular-nums">
-                {formatClock(puzzleElapsedMs)}
+              <p
+                className={`font-display text-4xl font-bold tabular-nums ${
+                  puzzleRemainingMs <= 30000
+                    ? "animate-pulse text-rose-400"
+                    : "text-cyan-300"
+                }`}
+              >
+                {formatClock(puzzleRemainingMs)}
               </p>
             </div>
           </div>
