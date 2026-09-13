@@ -8,7 +8,13 @@
  */
 import { EventType, type GameEvent } from "@/lib/game/types";
 
-export type ConnectionState = "connecting" | "open" | "reconnecting" | "error";
+export type ConnectionState =
+  | "connecting"
+  | "open"
+  | "rotating"
+  | "reconnecting"
+  | "error"
+  | "session_invalid";
 
 export interface SocketOptions {
   code: string;
@@ -44,6 +50,14 @@ function logRealtime(message: string, meta: Record<string, unknown>) {
   }
 }
 
+function getGameIdFromEvent(event: GameEvent): string | null {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  if (typeof event.gameId === "string") return event.gameId;
+  if (typeof payload.gameId === "string") return payload.gameId;
+  if (typeof payload.currentGameId === "string") return payload.currentGameId;
+  return null;
+}
+
 export class FuzalSocket {
   private es: EventSource | null = null;
   private closedByUser = true;
@@ -52,6 +66,8 @@ export class FuzalSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private generation = 0;
   private state: InternalState = "DISCONNECTED";
+  private expectedRotation = false;
+  private currentGameId: string | null = null;
 
   constructor(private opts: SocketOptions) {
     this.lastAppliedEventId = parseEventId(opts.initialLastEventId) ?? 0;
@@ -59,6 +75,7 @@ export class FuzalSocket {
 
   connect() {
     this.closedByUser = false;
+    this.expectedRotation = false;
     this.clearReconnectTimer();
     this.closeCurrent("connect");
     this.open();
@@ -67,6 +84,7 @@ export class FuzalSocket {
   retry() {
     this.retries = 0;
     this.closedByUser = false;
+    this.expectedRotation = false;
     this.clearReconnectTimer();
     this.closeCurrent("retry");
     this.open();
@@ -75,6 +93,7 @@ export class FuzalSocket {
   disconnect() {
     this.closedByUser = true;
     this.state = "DISCONNECTED";
+    this.expectedRotation = false;
     this.clearReconnectTimer();
     this.closeCurrent("disconnect");
   }
@@ -84,7 +103,7 @@ export class FuzalSocket {
 
     if (!this.hasCredentials()) {
       this.state = "DISCONNECTED";
-      this.opts.onStateChange?.("connecting");
+      this.opts.onStateChange?.("session_invalid");
       logRealtime("SSE_WAITING_FOR_CREDENTIALS", {
         code: this.opts.code,
         kind: this.opts.kind,
@@ -95,13 +114,14 @@ export class FuzalSocket {
     this.clearReconnectTimer();
     this.closeCurrent("replace");
     this.state = "CONNECTING";
-    this.opts.onStateChange?.(
-      this.retries === 0
+    const state: ConnectionState = this.expectedRotation
+      ? "rotating"
+      : this.retries === 0
         ? "connecting"
         : this.retries >= MAX_RETRIES_BEFORE_ERROR
           ? "error"
-          : "reconnecting",
-    );
+          : "reconnecting";
+    this.opts.onStateChange?.(state);
 
     const generation = ++this.generation;
     const url = this.buildUrl(false);
@@ -110,6 +130,7 @@ export class FuzalSocket {
     logRealtime("SSE_CONNECT", {
       code: this.opts.code,
       kind: this.opts.kind,
+      gameId: this.currentGameId,
       cursor: this.lastAppliedEventId,
       generation,
     });
@@ -117,13 +138,30 @@ export class FuzalSocket {
     es.onopen = () => {
       if (!this.isCurrent(es, generation)) return;
       this.retries = 0;
+      this.expectedRotation = false;
       this.state = "CONNECTED";
+      logRealtime("SSE_OPEN", {
+        code: this.opts.code,
+        kind: this.opts.kind,
+        gameId: this.currentGameId,
+        cursor: this.lastAppliedEventId,
+        generation,
+      });
       this.opts.onStateChange?.("open");
     };
 
     es.addEventListener("stream_end", () => {
       if (!this.isCurrent(es, generation)) return;
       this.state = "ROTATING";
+      this.expectedRotation = true;
+      logRealtime("SSE_ROTATION", {
+        code: this.opts.code,
+        kind: this.opts.kind,
+        gameId: this.currentGameId,
+        cursor: this.lastAppliedEventId,
+        generation,
+      });
+      this.opts.onStateChange?.("rotating");
       this.closeCurrent("stream_end");
       this.scheduleReconnect(0, "stream_end");
     });
@@ -142,6 +180,14 @@ export class FuzalSocket {
       if (!this.isCurrent(es, generation)) return;
       const verifyUrl = this.buildUrl(true);
       this.closeCurrent("error");
+      logRealtime("SSE_FAILURE", {
+        code: this.opts.code,
+        kind: this.opts.kind,
+        gameId: this.currentGameId,
+        cursor: this.lastAppliedEventId,
+        generation,
+        reason: "eventsource_error",
+      });
       void this.verifySession(verifyUrl).then((ok) => {
         if (!ok || this.closedByUser || this.state === "SESSION_EXPIRED") return;
         this.scheduleReconnect(undefined, "error");
@@ -174,8 +220,7 @@ export class FuzalSocket {
 
     if (
       eventId !== null &&
-      eventId <= this.lastAppliedEventId &&
-      event.type !== EventType.SNAPSHOT
+      eventId <= this.lastAppliedEventId
     ) {
       logRealtime("SSE_DUPLICATE_EVENT", {
         code: this.opts.code,
@@ -189,6 +234,8 @@ export class FuzalSocket {
 
     const accepted = this.opts.onEvent(event) !== false;
     if (accepted && eventId !== null && eventId > this.lastAppliedEventId) {
+      const gameId = getGameIdFromEvent(event);
+      if (gameId) this.currentGameId = gameId;
       this.lastAppliedEventId = eventId;
       this.opts.onCursorAdvance?.(eventId);
     }
@@ -198,6 +245,13 @@ export class FuzalSocket {
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (res.status === 401 || res.status === 403 || res.status === 410) {
+        logRealtime("SSE_FAILURE", {
+          code: this.opts.code,
+          kind: this.opts.kind,
+          gameId: this.currentGameId,
+          cursor: this.lastAppliedEventId,
+          reason: `verify_${res.status}`,
+        });
         this.expireSession(`verify_${res.status}`);
         return false;
       }
@@ -211,16 +265,25 @@ export class FuzalSocket {
     if (this.closedByUser || this.state === "SESSION_EXPIRED") return;
     if (this.reconnectTimer) return;
 
-    this.retries += 1;
+    const isExpectedRotation = reason === "stream_end";
+    if (!isExpectedRotation) {
+      this.expectedRotation = false;
+      this.retries += 1;
+    }
     const delay =
       delayOverrideMs ??
       Math.min(1000 * 2 ** Math.max(0, this.retries - 1), 8000);
     this.opts.onStateChange?.(
-      this.retries >= MAX_RETRIES_BEFORE_ERROR ? "error" : "reconnecting",
+      isExpectedRotation
+        ? "rotating"
+        : this.retries >= MAX_RETRIES_BEFORE_ERROR
+          ? "error"
+          : "reconnecting",
     );
     logRealtime("SSE_RECONNECT", {
       code: this.opts.code,
       kind: this.opts.kind,
+      gameId: this.currentGameId,
       cursor: this.lastAppliedEventId,
       retries: this.retries,
       delay,
@@ -239,7 +302,7 @@ export class FuzalSocket {
     this.closedByUser = true;
     this.clearReconnectTimer();
     this.closeCurrent(reason);
-    this.opts.onStateChange?.("error");
+    this.opts.onStateChange?.("session_invalid");
     this.opts.onSessionExpired?.();
   }
 
@@ -261,6 +324,7 @@ export class FuzalSocket {
     logRealtime("SSE_CLOSE", {
       code: this.opts.code,
       kind: this.opts.kind,
+      gameId: this.currentGameId,
       cursor: this.lastAppliedEventId,
       generation,
       reason,

@@ -101,6 +101,14 @@ async function claimClientAction(
   actionId?: string,
 ): Promise<boolean> {
   if (clientGameId && clientGameId !== lobby.currentGameId) {
+    console.warn("[ACTION_REJECTED]", {
+      actionId: actionId ?? null,
+      gameId: lobby.currentGameId ?? null,
+      clientGameId,
+      playerId,
+      actionType,
+      reason: "OLD_GAME",
+    });
     throw new GameError(
       "OLD_GAME",
       "This action belongs to an older game round.",
@@ -780,6 +788,12 @@ export const gameService = {
       const total = lobby.gridCols * lobby.gridRows;
       lobby.pieceCount = total;
       const gameId = lobby.currentGameId ?? null;
+      console.log("[PUZZLE_INIT]", {
+        gameId,
+        pieceCount: total,
+        rows: lobby.gridRows,
+        cols: lobby.gridCols,
+      });
       for (const p of lobby.players) {
         // Every player receives an independent shuffle.
         p.puzzle = {
@@ -960,6 +974,13 @@ export const gameService = {
         throw new GameError("BAD_REQUEST", "Invalid puzzle index.", 422);
       }
       if (from === to) return; // no-op tap, ignore
+      console.log("[ACTION_ACCEPTED]", {
+        actionId: actionId ?? null,
+        gameId,
+        playerId,
+        actionType: "SWAP",
+        version: null,
+      });
 
       const before = [...puzzle.board];
       puzzle.board = swapPieces(puzzle.board, from, to);
@@ -970,6 +991,7 @@ export const gameService = {
         playerId,
         from,
         to,
+        actionId: actionId ?? null,
         before,
         after: puzzle.board,
       });
@@ -992,6 +1014,7 @@ export const gameService = {
               completed: true,
               pieceCount: total,
               gameId,
+              actionId,
             },
             lobby.id,
             gameId,
@@ -1023,6 +1046,7 @@ export const gameService = {
             completed: false,
             pieceCount: total,
             gameId,
+            actionId,
           },
           lobby.id,
           gameId,
@@ -1034,7 +1058,7 @@ export const gameService = {
         ev(
           EventType.PUZZLE_MOVE,
           { playerId: player.id, moves: puzzle.moves, correctCount:
-            correctSlots(puzzle.board).filter(Boolean).length, gameId },
+            correctSlots(puzzle.board).filter(Boolean).length, gameId, actionId },
           lobby.id,
           gameId,
         ),
@@ -1087,6 +1111,13 @@ export const gameService = {
         throw new GameError("BAD_REQUEST", "Puzzle arrangement is not solved.", 400);
       }
 
+      console.log("[ACTION_ACCEPTED]", {
+        actionId: actionId ?? null,
+        gameId,
+        playerId,
+        actionType: "COMPLETE",
+        version: null,
+      });
       puzzle.completed = true;
       puzzle.completedAt = Date.now();
       await lobbyRepo.put(lobby);
@@ -1103,6 +1134,7 @@ export const gameService = {
             completed: true,
             pieceCount: total,
             gameId,
+            actionId,
           },
           lobby.id,
           gameId,

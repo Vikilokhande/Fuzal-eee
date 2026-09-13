@@ -114,6 +114,23 @@ export default function PlayerGamePage() {
     );
   }
 
+  if (connState === "session_invalid" && session && !state) {
+    return (
+      <Center>
+        <div className="glass max-w-sm p-8 text-center">
+          <div className="text-6xl">!</div>
+          <h2 className="mt-3 font-display text-2xl font-bold text-white">Session Ended</h2>
+          <p className="mt-2 text-indigo-100/70">
+            Your player session is no longer valid. Please join the game again.
+          </p>
+          <button className="btn-primary mt-6 w-full" onClick={() => router.push(`/join/${code}`)}>
+            Back to Join
+          </button>
+        </div>
+      </Center>
+    );
+  }
+
   if (!session || !state) {
     return (
       <Center>

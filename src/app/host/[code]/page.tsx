@@ -80,6 +80,23 @@ export default function HostPage() {
     );
   }
 
+  if (connState === "session_invalid" && token && !state) {
+    return (
+      <main className="grid min-h-screen place-items-center px-6 text-center">
+        <div className="glass max-w-md p-8">
+          <div className="text-6xl">!</div>
+          <h1 className="mt-3 font-display text-2xl font-bold text-white">Host Session Ended</h1>
+          <p className="mt-2 text-indigo-100/70">
+            This host token is no longer valid. Create a new lobby to continue.
+          </p>
+          <button className="btn-primary mt-6 w-full" onClick={() => router.push("/")}>
+            Back to Home
+          </button>
+        </div>
+      </main>
+    );
+  }
+
   if (!token || !state) {
     return (
       <main className="grid min-h-screen place-items-center">

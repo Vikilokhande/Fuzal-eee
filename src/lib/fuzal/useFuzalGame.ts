@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FuzalSocket, type ConnectionState } from "./realtime";
-import { pieceUrl, postAction, sessionStore } from "./api";
+import { pieceUrl, postAction, sessionStore, type ApiError } from "./api";
 import {
   EventType,
   GameState,
@@ -125,6 +125,45 @@ function makeActionId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function actionErrorMeta(error: unknown): { reason: string; status: number | null; code: string | null } {
+  const err = error as ApiError;
+  return {
+    reason: err.code ?? (err.status ? `HTTP_${err.status}` : err.message || "NETWORK_ERROR"),
+    status: typeof err.status === "number" ? err.status : null,
+    code: typeof err.code === "string" ? err.code : null,
+  };
+}
+
+function isRetryableActionError(error: unknown): boolean {
+  const status = (error as ApiError).status;
+  if (typeof status !== "number") return true;
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function postActionUntilSettled(
+  code: string,
+  body: Record<string, unknown>,
+  shouldContinue: () => boolean,
+  onRetryableFailure: (error: unknown, attempt: number) => void,
+): Promise<boolean> {
+  for (let attempt = 1; ; attempt += 1) {
+    if (!shouldContinue()) return false;
+    try {
+      await postAction(code, body);
+      return true;
+    } catch (error) {
+      if (!isRetryableActionError(error)) throw error;
+      if (!shouldContinue()) return false;
+      onRetryableFailure(error, attempt);
+      await delay(Math.min(250 * 2 ** Math.min(attempt - 1, 5), 8000));
+    }
+  }
+}
+
 function countLoadedPieces(srcs: Record<number, string>, total: number): number {
   let loaded = 0;
   for (let i = 0; i < total; i += 1) {
@@ -233,14 +272,26 @@ function applyDimensions(next: ClientState, payload: Record<string, unknown>) {
   );
 }
 
+function logClientDiagnostic(
+  label: string,
+  meta: Record<string, unknown>,
+  level: "info" | "warn" | "error" = "info",
+) {
+  if (process.env.NODE_ENV === "test") return;
+  const logger = level === "warn" ? console.warn : level === "error" ? console.error : console.info;
+  logger(`[${label}]`, meta);
+}
+
 function logStateRejected(reason: string, event: GameEvent, meta: Record<string, unknown> = {}) {
-  console.warn("[STATE_REJECTED]", {
+  logClientDiagnostic("STATE_REJECTED", {
+    currentVersion: meta.currentVersion ?? null,
+    incomingVersion: Number.isInteger(event.eventId) ? event.eventId : null,
     reason,
     type: event.type,
     eventId: event.eventId ?? null,
     gameId: getEventGameId(event),
     ...meta,
-  });
+  }, "warn");
 }
 
 async function decodeImageSrc(src: string): Promise<void> {
@@ -280,6 +331,7 @@ export function useFuzalGame(opts: UseOpts) {
   const stateRef = useRef<ClientState | null>(null);
   const lastAppliedEventId = useRef(0);
   const swapInFlightRef = useRef<string | null>(null);
+  const acceptedActionVersions = useRef<Map<string, number | null>>(new Map());
 
   const commitState = useCallback((next: ClientState | null) => {
     stateRef.current = next;
@@ -296,6 +348,18 @@ export function useFuzalGame(opts: UseOpts) {
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
+  const markActionAccepted = useCallback((actionId: string, version: number | null) => {
+    const existingVersion = acceptedActionVersions.current.get(actionId);
+    if (existingVersion !== undefined && !(existingVersion === null && version !== null)) {
+      return;
+    }
+    acceptedActionVersions.current.set(actionId, version);
+    logClientDiagnostic("ACTION_ACCEPTED", { actionId, version });
+    if (swapInFlightRef.current === actionId) {
+      swapInFlightRef.current = null;
+    }
+  }, []);
+
   const applyEvent = useCallback(
     (event: GameEvent): boolean => {
       if (typeof event.at === "number") {
@@ -305,6 +369,29 @@ export function useFuzalGame(opts: UseOpts) {
 
       if (event.type === EventType.SNAPSHOT) {
         const snapshot = normalizeSnapshot(p, event, opts.kind);
+        const prev = stateRef.current;
+        if (
+          swapInFlightRef.current &&
+          prev?.puzzle &&
+          snapshot.puzzle &&
+          prev.currentGameId &&
+          snapshot.currentGameId === prev.currentGameId
+        ) {
+          const boardDiffers =
+            prev.puzzle.board.length !== snapshot.puzzle.board.length ||
+            prev.puzzle.board.some((piece, slot) => piece !== snapshot.puzzle!.board[slot]);
+          if (
+            snapshot.puzzle.moves < prev.puzzle.moves ||
+            (snapshot.puzzle.moves === prev.puzzle.moves && boardDiffers)
+          ) {
+            logStateRejected("STALE_PENDING_ACTION_SNAPSHOT", event, {
+              currentVersion: lastAppliedEventId.current,
+              currentMoves: prev.puzzle.moves,
+              incomingMoves: snapshot.puzzle.moves,
+            });
+            return false;
+          }
+        }
         commitState(snapshot);
         if (Number.isInteger(event.eventId) && Number(event.eventId) > lastAppliedEventId.current) {
           lastAppliedEventId.current = Number(event.eventId);
@@ -328,6 +415,7 @@ export function useFuzalGame(opts: UseOpts) {
       );
       if (!decision.accept) {
         logStateRejected(decision.reason ?? "UNKNOWN", event, {
+          currentVersion: lastAppliedEventId.current,
           current: decision.current,
           incoming: decision.incoming,
         });
@@ -341,18 +429,47 @@ export function useFuzalGame(opts: UseOpts) {
         nextRows,
         asPositiveInt(p.pieceCount, prev.pieceCount),
       );
+      const eventGameId = getEventGameId(event);
       if (
         (event.type === EventType.PUZZLE_STARTED || event.type === EventType.PUZZLE_MOVE) &&
         Array.isArray(p.board) &&
         !isValidPuzzleBoard(p.board, nextPieceCount)
       ) {
-        logStateRejected("INVALID_BOARD", event, { pieceCount: nextPieceCount });
+        logStateRejected("INVALID_BOARD", event, {
+          currentVersion: lastAppliedEventId.current,
+          pieceCount: nextPieceCount,
+        });
         return false;
+      }
+      if (
+        swapInFlightRef.current &&
+        event.type === EventType.PUZZLE_MOVE &&
+        Array.isArray(p.board) &&
+        prev.puzzle &&
+        (!eventGameId || !prev.currentGameId || eventGameId === prev.currentGameId)
+      ) {
+        const payloadActionId = asNullableString(p.actionId);
+        const incomingMoves = asNumber(p.moves, prev.puzzle.moves);
+        const incomingBoard = p.board as number[];
+        const boardDiffers =
+          incomingBoard.length !== prev.puzzle.board.length ||
+          incomingBoard.some((piece, slot) => piece !== prev.puzzle!.board[slot]);
+        if (
+          payloadActionId !== swapInFlightRef.current &&
+          (incomingMoves < prev.puzzle.moves ||
+            (incomingMoves === prev.puzzle.moves && boardDiffers))
+        ) {
+          logStateRejected("STALE_PENDING_ACTION_STATE", event, {
+            currentVersion: lastAppliedEventId.current,
+            currentMoves: prev.puzzle.moves,
+            incomingMoves,
+          });
+          return false;
+        }
       }
 
       const next: ClientState = { ...prev };
       applyDimensions(next, p);
-      const eventGameId = getEventGameId(event);
       if (eventGameId) {
         next.currentGameId = eventGameId;
       }
@@ -462,6 +579,10 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
         case EventType.PUZZLE_MOVE: {
+          const payloadActionId = asNullableString(p.actionId);
+          if (payloadActionId && payloadActionId === swapInFlightRef.current) {
+            markActionAccepted(payloadActionId, event.eventId ?? null);
+          }
           if (Array.isArray(p.board)) {
             const board = p.board as number[];
             const isCompleted = Boolean(p.completed);
@@ -573,7 +694,7 @@ export function useFuzalGame(opts: UseOpts) {
       }
       return true;
     },
-    [commitState, opts.code, opts.kind, opts.playerId, showToast],
+    [commitState, markActionAccepted, opts.code, opts.kind, opts.playerId, showToast],
   );
 
   const authReady = useMemo(() => hasSocketAuth(opts), [opts]);
@@ -582,7 +703,7 @@ export function useFuzalGame(opts: UseOpts) {
     if (!authReady) {
       socketRef.current?.disconnect();
       socketRef.current = null;
-      setConnState("connecting");
+      setConnState("session_invalid");
       return;
     }
 
@@ -599,26 +720,20 @@ export function useFuzalGame(opts: UseOpts) {
       },
       onStateChange: setConnState,
       onSessionExpired: () => {
+        swapInFlightRef.current = null;
         if (opts.kind === "player") {
           try {
             sessionStore.remove("fuzal_player_session");
             sessionStore.remove(`player:${opts.code}`);
           } catch {}
           showToast("Game session has ended or was reset by the host.");
-          const prev = stateRef.current;
-          commitState(
-            prev
-              ? {
-                  ...prev,
-                  status: GameState.LOBBY,
-                  currentGameId: null,
-                  puzzle: null,
-                  result: null,
-                  players: [],
-                }
-              : null,
-          );
+        } else {
+          try {
+            sessionStore.remove(`host:${opts.code}`);
+          } catch {}
+          showToast("Host session has ended or was reset.");
         }
+        commitState(null);
       },
     });
     socketRef.current = socket;
@@ -756,6 +871,17 @@ export function useFuzalGame(opts: UseOpts) {
       const nextBoard = swapPieces(prev.puzzle.board, from, to);
       const solved = isSolved(nextBoard, totalPieces);
       swapInFlightRef.current = actionId;
+      logClientDiagnostic("ACTION_SENT", {
+        actionId,
+        gameId: prev.currentGameId,
+      });
+      logClientDiagnostic("BOARD_MUTATION", {
+        cause: "USER_SWAP_OPTIMISTIC",
+        actionId,
+        gameId: prev.currentGameId,
+        before: prev.puzzle.board,
+        after: nextBoard,
+      });
       commitState({
         ...prev,
         puzzle: {
@@ -769,17 +895,56 @@ export function useFuzalGame(opts: UseOpts) {
         },
       });
 
+      const actionBody = {
+        type: "SWAP",
+        token: opts.playerToken,
+        playerId: opts.playerId,
+        from,
+        to,
+        gameId: prev.currentGameId,
+        actionId,
+      };
+
       try {
-        await postAction(opts.code, {
-          type: "SWAP",
-          token: opts.playerToken,
-          playerId: opts.playerId,
-          from,
-          to,
-          gameId: prev.currentGameId,
-          actionId,
-        });
+        const accepted = await postActionUntilSettled(
+          opts.code,
+          actionBody,
+          () =>
+            swapInFlightRef.current === actionId &&
+            stateRef.current?.currentGameId === prev.currentGameId,
+          (error, attempt) => {
+            logClientDiagnostic(
+              "ACTION_REJECTED",
+              {
+                actionId,
+                gameId: prev.currentGameId,
+                retryable: true,
+                attempt,
+                ...actionErrorMeta(error),
+              },
+              "warn",
+            );
+            if (attempt === 1) {
+              showToast("Move is syncing. We'll keep retrying.");
+            }
+          },
+        );
+        if (accepted) {
+          markActionAccepted(actionId, null);
+        } else if (swapInFlightRef.current === actionId) {
+          swapInFlightRef.current = null;
+        }
       } catch (e) {
+        logClientDiagnostic(
+          "ACTION_REJECTED",
+          {
+            actionId,
+            gameId: prev.currentGameId,
+            retryable: false,
+            ...actionErrorMeta(e),
+          },
+          "warn",
+        );
         const current = stateRef.current;
         if (
           swapInFlightRef.current === actionId &&
@@ -789,13 +954,20 @@ export function useFuzalGame(opts: UseOpts) {
           commitState({ ...current, puzzle: previousPuzzle });
         }
         showToast((e as Error).message);
-      } finally {
         if (swapInFlightRef.current === actionId) {
           swapInFlightRef.current = null;
         }
       }
     },
-    [commitState, isEliminated, opts.code, opts.playerId, opts.playerToken, showToast],
+    [
+      commitState,
+      isEliminated,
+      markActionAccepted,
+      opts.code,
+      opts.playerId,
+      opts.playerToken,
+      showToast,
+    ],
   );
 
   /* ------------- Preload puzzle pieces with retry & validation ------------- */
@@ -828,13 +1000,22 @@ export function useFuzalGame(opts: UseOpts) {
     let failed = 0;
 
     const recordProgress = () => {
-      console.info("[PUZZLE_LOADING]", {
+      const ready = loaded.size === total && failed === 0;
+      logClientDiagnostic("PUZZLE_LOADING", {
         gameId,
         pieceCount: total,
         loaded: loaded.size,
         failed,
-        ready: loaded.size === total && failed === 0,
+        ready,
       });
+      if (ready) {
+        logClientDiagnostic("PUZZLE_READY", {
+          gameId,
+          pieceCount: total,
+          loaded: loaded.size,
+          failed,
+        });
+      }
     };
 
     async function acceptPiece(pieceId: number, src: string) {
@@ -948,6 +1129,8 @@ export function useFuzalGame(opts: UseOpts) {
 
   const exitGame = useCallback(() => {
     socketRef.current?.disconnect();
+    swapInFlightRef.current = null;
+    acceptedActionVersions.current.clear();
     try {
       sessionStore.remove("fuzal_player_session");
       sessionStore.remove(`player:${opts.code}`);

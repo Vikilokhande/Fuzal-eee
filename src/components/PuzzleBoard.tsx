@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { isPieceCorrectAtSlot } from "@/lib/game/puzzle";
 
 /**
@@ -17,6 +17,21 @@ import { isPieceCorrectAtSlot } from "@/lib/game/puzzle";
  * and image stretching/warping.
  */
 const DRAG_THRESHOLD_PX = 8;
+
+type DragVisual = {
+  startSlot: number;
+  pointerId: number;
+  currentX: number;
+  currentY: number;
+  hoverSlot: number | null;
+  pieceSize: number;
+};
+
+function logPuzzleDiagnostic(label: string, meta: Record<string, unknown>) {
+  if (process.env.NODE_ENV !== "test") {
+    console.debug(`[${label}]`, meta);
+  }
+}
 
 export function PuzzleBoard({
   board,
@@ -53,14 +68,10 @@ export function PuzzleBoard({
   const animTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Active visual drag state for rendering the floating avatar and target hover
-  const [dragVisual, setDragVisual] = useState<{
-    startSlot: number;
-    pointerId: number;
-    currentX: number;
-    currentY: number;
-    hoverSlot: number | null;
-    pieceSize: number;
-  } | null>(null);
+  const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
+  const dragVisualRef = useRef<DragVisual | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
+  const lastDragMoveLogAt = useRef(Number.NEGATIVE_INFINITY);
 
   // Pointer tracking ref for synchronous, accurate gesture evaluation
   const pointerTracker = useRef<{
@@ -77,6 +88,34 @@ export function PuzzleBoard({
 
   // Mutex lock to prevent duplicate swaps from rapid tap or synthetic events
   const swapLockRef = useRef(false);
+
+  const scheduleDragVisual = useCallback((next: DragVisual) => {
+    dragVisualRef.current = next;
+    if (dragFrameRef.current !== null) return;
+
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      setDragVisual(next);
+      return;
+    }
+
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      setDragVisual(dragVisualRef.current);
+    });
+  }, []);
+
+  const clearDragVisual = useCallback((commit = true) => {
+    dragVisualRef.current = null;
+    if (
+      dragFrameRef.current !== null &&
+      typeof window !== "undefined" &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      window.cancelAnimationFrame(dragFrameRef.current);
+    }
+    dragFrameRef.current = null;
+    if (commit) setDragVisual(null);
+  }, []);
 
   useEffect(() => {
     const prev = previous.current;
@@ -105,6 +144,10 @@ export function PuzzleBoard({
     };
   }, []);
 
+  useEffect(() => {
+    return () => clearDragVisual(false);
+  }, [clearDragVisual]);
+
   const total = pieceCount ?? cols * rows;
   const boardValid =
     board.length === total &&
@@ -127,10 +170,10 @@ export function PuzzleBoard({
   useEffect(() => {
     if (completed) {
       setSelected(null);
-      setDragVisual(null);
+      clearDragVisual();
       pointerTracker.current = null;
     }
-  }, [completed]);
+  }, [clearDragVisual, completed]);
 
   /** Calculates grid slot from screen client coordinates */
   const getSlotAtCoords = (clientX: number, clientY: number): number | null => {
@@ -185,6 +228,7 @@ export function PuzzleBoard({
       hoverSlot: slot,
       cellRect,
     };
+    lastDragMoveLogAt.current = Number.NEGATIVE_INFINITY;
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -202,15 +246,31 @@ export function PuzzleBoard({
       tracker.isDragging = true;
       // Drag started: clear tap selection so gestures do not conflict
       setSelected(null);
+      logPuzzleDiagnostic("DRAG_START", {
+        sourceIndex: tracker.startSlot,
+      });
     }
 
     if (tracker.isDragging) {
       const hover = getSlotAtCoords(e.clientX, e.clientY);
       tracker.hoverSlot = hover;
 
-      // Update visual drag position.
-      // NOTE: Logical board state is NEVER mutated during move!
-      setDragVisual({
+      const now =
+        typeof performance !== "undefined" && typeof performance.now === "function"
+          ? performance.now()
+          : Date.now();
+      if (now - lastDragMoveLogAt.current > 120) {
+        lastDragMoveLogAt.current = now;
+        logPuzzleDiagnostic("DRAG_MOVE", {
+          sourceIndex: tracker.startSlot,
+          pointerX: Math.round(e.clientX),
+          pointerY: Math.round(e.clientY),
+          targetPreview: hover,
+        });
+      }
+
+      // Update visual drag position only. Logical board state is never mutated during move.
+      scheduleDragVisual({
         startSlot: tracker.startSlot,
         pointerId: tracker.pointerId,
         currentX: e.clientX,
@@ -232,11 +292,15 @@ export function PuzzleBoard({
 
     // Clear trackers immediately
     pointerTracker.current = null;
-    setDragVisual(null);
+    clearDragVisual();
 
     if (tracker.isDragging) {
       // ---------- DRAG GESTURE COMPLETED ----------
       const targetSlot = getSlotAtCoords(e.clientX, e.clientY);
+      logPuzzleDiagnostic("DRAG_DROP", {
+        sourceIndex: tracker.startSlot,
+        targetIndex: targetSlot,
+      });
 
       if (
         targetSlot !== null &&
@@ -286,7 +350,7 @@ export function PuzzleBoard({
 
     if (tracker && tracker.pointerId === e.pointerId) {
       pointerTracker.current = null;
-      setDragVisual(null);
+      clearDragVisual();
       setSelected(null);
     }
   };
@@ -413,11 +477,14 @@ export function PuzzleBoard({
           style={{
             width: dragVisual.pieceSize,
             height: dragVisual.pieceSize,
-            left: dragVisual.currentX - dragVisual.pieceSize / 2,
-            top: dragVisual.currentY - dragVisual.pieceSize / 2,
-            transform: "scale(1.06)",
+            left: 0,
+            top: 0,
+            transform: `translate3d(${dragVisual.currentX - dragVisual.pieceSize / 2}px, ${
+              dragVisual.currentY - dragVisual.pieceSize / 2
+            }px, 0) scale(1.06)`,
             touchAction: "none",
             userSelect: "none",
+            willChange: "transform",
           }}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}

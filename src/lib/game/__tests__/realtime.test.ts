@@ -74,7 +74,7 @@ describe("FuzalSocket", () => {
     socket.connect();
 
     expect(FakeEventSource.instances).toHaveLength(0);
-    expect(states).toEqual(["connecting"]);
+    expect(states).toEqual(["session_invalid"]);
   });
 
   it("advances its cursor only after the event handler accepts the event", () => {
@@ -100,6 +100,28 @@ describe("FuzalSocket", () => {
 
     expect(received).toEqual([EventType.MEMORY_PHASE_STARTED, EventType.PUZZLE_STARTED]);
     expect(cursors).toEqual([6]);
+    socket.disconnect();
+  });
+
+  it("ignores snapshots that are older than the accepted cursor", () => {
+    const received: EventType[] = [];
+    const socket = new FuzalSocket({
+      code: "ABCD",
+      kind: "player",
+      playerId: "11111111-1111-4111-8111-111111111111",
+      playerToken: "x".repeat(24),
+      initialLastEventId: 10,
+      onEvent: (event) => {
+        received.push(event.type);
+      },
+    });
+
+    socket.connect();
+    const es = FakeEventSource.instances[0];
+    es.emitMessage({ type: EventType.SNAPSHOT, at: 1, payload: {} }, "10");
+    es.emitMessage({ type: EventType.SNAPSHOT, at: 2, payload: {} }, "11");
+
+    expect(received).toEqual([EventType.SNAPSHOT]);
     socket.disconnect();
   });
 
@@ -140,5 +162,95 @@ describe("FuzalSocket", () => {
     expect(first.closed).toBe(true);
     expect(FakeEventSource.instances).toHaveLength(2);
     socket.disconnect();
+  });
+
+  it("keeps normal stream rotation out of the real failure state", async () => {
+    const states: ConnectionState[] = [];
+    const socket = new FuzalSocket({
+      code: "ABCD",
+      kind: "player",
+      playerId: "11111111-1111-4111-8111-111111111111",
+      playerToken: "x".repeat(24),
+      onEvent: vi.fn(),
+      onStateChange: (state) => states.push(state),
+    });
+
+    socket.connect();
+    const first = FakeEventSource.instances[0];
+    first.onopen?.(new Event("open"));
+    first.emit("stream_end");
+    await vi.advanceTimersByTimeAsync(0);
+    const second = FakeEventSource.instances[1];
+    second.onopen?.(new Event("open"));
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(first.closed).toBe(true);
+    expect(states).toContain("rotating");
+    expect(states).not.toContain("reconnecting");
+    expect(states).not.toContain("error");
+    expect(states[states.length - 1]).toBe("open");
+    socket.disconnect();
+  });
+
+  it("disconnect cancels the pending replacement stream after rotation", async () => {
+    const socket = new FuzalSocket({
+      code: "ABCD",
+      kind: "host",
+      hostToken: "x".repeat(24),
+      onEvent: vi.fn(),
+    });
+
+    socket.connect();
+    const first = FakeEventSource.instances[0];
+    first.emit("stream_end");
+    socket.disconnect();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(first.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it("reports real EventSource failures as reconnecting and opens one replacement", async () => {
+    const states: ConnectionState[] = [];
+    const socket = new FuzalSocket({
+      code: "ABCD",
+      kind: "host",
+      hostToken: "x".repeat(24),
+      onEvent: vi.fn(),
+      onStateChange: (state) => states.push(state),
+    });
+
+    socket.connect();
+    const first = FakeEventSource.instances[0];
+    first.onopen?.(new Event("open"));
+    first.emitError();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(first.closed).toBe(true);
+    expect(states).toContain("reconnecting");
+    expect(FakeEventSource.instances).toHaveLength(2);
+    socket.disconnect();
+  });
+
+  it("stops reconnecting after a 403 verification response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 403 })));
+    const states: ConnectionState[] = [];
+    const socket = new FuzalSocket({
+      code: "ABCD",
+      kind: "player",
+      playerId: "11111111-1111-4111-8111-111111111111",
+      playerToken: "x".repeat(24),
+      onEvent: vi.fn(),
+      onStateChange: (state) => states.push(state),
+    });
+
+    socket.connect();
+    const first = FakeEventSource.instances[0];
+    first.emitError();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(first.closed).toBe(true);
+    expect(states).toContain("session_invalid");
+    expect(FakeEventSource.instances).toHaveLength(1);
   });
 });

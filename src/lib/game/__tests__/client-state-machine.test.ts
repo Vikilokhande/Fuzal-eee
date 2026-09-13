@@ -76,4 +76,11 @@ describe("client realtime state gate", () => {
     expect(isValidPuzzleBoard(Array.from({ length: 9 }, (_, i) => i), 12)).toBe(false);
     expect(isValidPuzzleBoard([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10], 12)).toBe(false);
   });
+
+  it("keeps 16-piece boards valid for 4x4 rounds", () => {
+    expect(getPieceCount(4, 4, null)).toBe(16);
+    expect(isValidPuzzleBoard(Array.from({ length: 16 }, (_, i) => i), 16)).toBe(true);
+    expect(isValidPuzzleBoard(Array.from({ length: 12 }, (_, i) => i), 16)).toBe(false);
+    expect(isValidPuzzleBoard([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 14], 16)).toBe(false);
+  });
 });

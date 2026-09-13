@@ -17,12 +17,23 @@ export interface JoinedPlayer {
   slot: number;
 }
 
-async function parseError(res: Response): Promise<Error> {
+export type ApiError = Error & {
+  status?: number;
+  code?: string;
+};
+
+async function parseError(res: Response): Promise<ApiError> {
   try {
     const data = await res.json();
-    return new Error(data.message ?? "Something went wrong. Please try again.");
+    const err = new Error(data.message ?? "Something went wrong. Please try again.") as ApiError;
+    err.status = res.status;
+    if (typeof data.error === "string") err.code = data.error;
+    if (typeof data.code === "string") err.code = data.code;
+    return err;
   } catch {
-    return new Error("Something went wrong. Please try again.");
+    const err = new Error("Something went wrong. Please try again.") as ApiError;
+    err.status = res.status;
+    return err;
   }
 }
 
