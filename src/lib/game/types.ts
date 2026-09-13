@@ -168,6 +168,10 @@ export const swapAction = actionBase.extend({
   from: z.number().int().min(0).max(35),
   to: z.number().int().min(0).max(35),
 });
+export const completeAction = actionBase.extend({
+  type: z.literal("COMPLETE"),
+  playerId: z.string().min(3),
+});
 export const playAgainAction = actionBase.extend({
   type: z.literal("PLAY_AGAIN"),
 });
@@ -178,6 +182,7 @@ export const backToLobbyAction = actionBase.extend({
 export const actionSchema = z.union([
   startGameAction,
   swapAction,
+  completeAction,
   playAgainAction,
   backToLobbyAction,
 ]);

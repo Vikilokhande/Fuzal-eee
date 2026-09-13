@@ -236,10 +236,16 @@ export default function PlayerGamePage() {
                   </p>
                 </div>
                 <div className="text-center">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-indigo-200/70">
-                    Arrange the image
+                  <p
+                    className={`text-[10px] font-bold uppercase tracking-[0.25em] ${
+                      state.puzzle?.completed ? "text-emerald-400" : "text-indigo-200/70"
+                    }`}
+                  >
+                    {state.puzzle?.completed ? "Completed" : "Arrange the image"}
                   </p>
-                  <p className="text-sm font-semibold text-white">Tap two pieces to swap</p>
+                  <p className="text-sm font-semibold text-white">
+                    {state.puzzle?.completed ? "🎉 Puzzle Solved!" : "Tap two pieces to swap"}
+                  </p>
                 </div>
                 <div className="text-right">
                   <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-indigo-200/70">
@@ -250,6 +256,13 @@ export default function PlayerGamePage() {
                   </p>
                 </div>
               </div>
+
+              {state.puzzle?.completed && !isEliminated && (
+                <div className="flex w-full max-w-[min(94vw,560px)] items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/20 px-4 py-2 text-center text-sm font-semibold text-emerald-300 shadow-lg">
+                  <span>🎉</span>
+                  <span>PUZZLE SOLVED! Waiting for final results…</span>
+                </div>
+              )}
 
               {isEliminated ? (
                 <div className="glass flex w-full max-w-[min(94vw,560px)] flex-col items-center justify-center gap-5 rounded-2xl p-8 text-center shadow-2xl ring-1 ring-rose-500/40">
@@ -282,6 +295,7 @@ export default function PlayerGamePage() {
                   pieceSrcs={pieceSrcs}
                   loading={piecesLoading}
                   error={piecesError}
+                  completed={Boolean(state.puzzle.completed)}
                   onRetry={retryLoadPieces}
                   onSwap={game.actions.swap}
                 />

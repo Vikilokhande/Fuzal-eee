@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FuzalSocket, type ConnectionState } from "./realtime";
 import { pieceUrl, postAction } from "./api";
 import { EventType, type GameEvent, type GameState } from "@/lib/game/types";
-import { swapPieces, correctSlots as computeCorrect } from "@/lib/game/puzzle";
+import { swapPieces, correctSlots as computeCorrect, isSolved } from "@/lib/game/puzzle";
 
 export interface PlayerView {
   id: string;
@@ -48,6 +48,7 @@ export interface ClientState {
     startedAt: number;
     correctSlots: boolean[];
     completed?: boolean;
+    completedAt?: number;
     eliminated?: boolean;
   } | null;
   puzzleStartedAt: number | null;
@@ -194,12 +195,14 @@ export function useFuzalGame(opts: UseOpts) {
         case EventType.PUZZLE_MOVE: {
           if (Array.isArray(p.board)) {
             const board = p.board as number[];
+            const isCompleted = Boolean(p.completed);
             next.puzzle = {
               board,
               moves: (p.moves as number) ?? next.puzzle?.moves ?? 0,
               startedAt: next.puzzle?.startedAt ?? Date.now(),
               correctSlots: computeCorrect(board),
               eliminated: next.puzzle?.eliminated ?? false,
+              completed: next.puzzle?.completed || isCompleted,
             };
           }
           if (typeof p.playerId === "string" && Array.isArray(next.puzzleProgress)) {
@@ -347,21 +350,44 @@ export function useFuzalGame(opts: UseOpts) {
 
   const swap = useCallback(
     async (from: number, to: number) => {
-      if (!opts.playerId || !opts.playerToken || from === to || isEliminated) return;
-      // Optimistic swap for instant touch feedback; server frame is truth.
+      // Step 6: Prevent further moves if player is eliminated, parameters invalid, or puzzle already solved
+      if (
+        !opts.playerId ||
+        !opts.playerToken ||
+        from === to ||
+        isEliminated ||
+        state?.puzzle?.completed
+      ) {
+        return;
+      }
+
+      const totalPieces = (state?.gridCols ?? 4) * (state?.gridRows ?? 4);
+      let isNowSolved = false;
+
+      // Step 1: Update the board state
+      // Step 2: Recalculate which positions are correct
+      // Step 3: Check ALL 16 positions against the canonical solved mapping
+      // Step 4: If all 16 are correct, mark the puzzle SOLVED exactly once
       setState((prev) => {
-        if (!prev?.puzzle) return prev;
-        const board = swapPieces(prev.puzzle.board, from, to);
+        if (!prev?.puzzle || prev.puzzle.completed) return prev;
+        const nextBoard = swapPieces(prev.puzzle.board, from, to);
+        const nextCorrectSlots = computeCorrect(nextBoard);
+        isNowSolved = isSolved(nextBoard, totalPieces);
+
         return {
           ...prev,
           puzzle: {
             ...prev.puzzle,
-            board,
+            board: nextBoard,
             moves: prev.puzzle.moves + 1,
-            correctSlots: computeCorrect(board),
+            correctSlots: nextCorrectSlots,
+            completed: prev.puzzle.completed || isNowSolved,
+            completedAt: isNowSolved && !prev.puzzle.completedAt ? Date.now() : prev.puzzle.completedAt,
           },
         };
       });
+
+      // Step 5: Send exactly one completion/swap request to the server
       try {
         await postAction(opts.code, {
           type: "SWAP",
@@ -370,11 +396,32 @@ export function useFuzalGame(opts: UseOpts) {
           from,
           to,
         });
+
+        if (isNowSolved) {
+          try {
+            await postAction(opts.code, {
+              type: "COMPLETE",
+              token: opts.playerToken,
+              playerId: opts.playerId,
+            });
+          } catch {
+            // Server SWAP handler already independently validates and finishes the round
+          }
+        }
       } catch (e) {
         showToast((e as Error).message);
       }
     },
-    [opts.code, opts.playerId, opts.playerToken, isEliminated, showToast],
+    [
+      opts.code,
+      opts.playerId,
+      opts.playerToken,
+      isEliminated,
+      state?.puzzle?.completed,
+      state?.gridCols,
+      state?.gridRows,
+      showToast,
+    ],
   );
 
   /* ------------- Preload puzzle pieces with retry & validation ------------- */

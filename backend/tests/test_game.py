@@ -9,6 +9,8 @@ from app.models.schemas import GameState, PlayerConnection
 from app.services.game_service import GameError, GameService
 from app.services.puzzle_service import (
     generate_shuffled_board,
+    get_correct_position_for_piece,
+    is_piece_correct_at_slot,
     is_solved,
     swap_pieces,
 )
@@ -29,13 +31,37 @@ def test_shuffle_never_solved_or_trivial():
     for _ in range(300):
         board = generate_shuffled_board(16)
         assert len(board) == 16
-        assert not is_solved(board)
+        assert not is_solved(board, 16)
         assert sum(1 for i, x in enumerate(board) if x != i) >= 4
         assert sorted(board) == list(range(16))
 
 
 def test_swap_is_immutable():
     assert swap_pieces([0, 1, 2, 3], 0, 3) == [3, 1, 2, 0]
+
+
+def test_canonical_mapping_and_solved_invariants():
+    for i in range(16):
+        assert get_correct_position_for_piece(i) == i
+        assert is_piece_correct_at_slot(i, i) is True
+        assert is_piece_correct_at_slot(i, (i + 1) % 16) is False
+
+    solved16 = list(range(16))
+    assert is_solved(solved16, 16) is True
+
+    # Rejects invalid lengths
+    assert is_solved(list(range(15)), 16) is False
+    assert is_solved(list(range(17)), 16) is False
+
+    # Rejects duplicates
+    with_dup = list(range(16))
+    with_dup[15] = 0
+    assert is_solved(with_dup, 16) is False
+
+    # Rejects out-of-bounds
+    out_of_bounds = list(range(16))
+    out_of_bounds[0] = 99
+    assert is_solved(out_of_bounds, 16) is False
 
 
 # --------- lobby lifecycle ---------

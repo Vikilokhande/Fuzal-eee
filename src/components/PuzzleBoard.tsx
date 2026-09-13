@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import { isPieceCorrectAtSlot } from "@/lib/game/puzzle";
 
 /**
  * Mobile-first puzzle board with unified pointer event engine.
@@ -23,6 +24,7 @@ export function PuzzleBoard({
   rows,
   pieceSrcs,
   interactive = true,
+  completed = false,
   loading = false,
   error = null,
   onRetry,
@@ -33,6 +35,7 @@ export function PuzzleBoard({
   rows: number;
   pieceSrcs: Record<number, string>;
   interactive?: boolean;
+  completed?: boolean;
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
@@ -88,7 +91,16 @@ export function PuzzleBoard({
 
   const total = cols * rows;
   const ready = Object.keys(pieceSrcs).length >= total && !loading;
-  const isInteractive = interactive && ready;
+  const isInteractive = interactive && ready && !completed;
+
+  // Clear any active drag or selection state once the puzzle is completed
+  useEffect(() => {
+    if (completed) {
+      setSelected(null);
+      setDragVisual(null);
+      pointerTracker.current = null;
+    }
+  }, [completed]);
 
   /** Calculates grid slot from screen client coordinates */
   const getSlotAtCoords = (clientX: number, clientY: number): number | null => {
@@ -300,7 +312,7 @@ export function PuzzleBoard({
         aria-label="Puzzle board"
       >
         {board.map((pieceId, slot) => {
-          const isCorrect = pieceId === slot;
+          const isCorrect = isPieceCorrectAtSlot(pieceId, slot);
           const src = pieceSrcs[pieceId];
           const isSelected = selected === slot;
           const isAnimating = animSlots.includes(slot);

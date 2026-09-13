@@ -741,7 +741,7 @@ export const gameService = {
       puzzle.board = swapPieces(puzzle.board, from, to);
       puzzle.moves += 1;
 
-      const solved = isSolved(puzzle.board);
+      const solved = isSolved(puzzle.board, total);
       if (solved) {
         puzzle.completed = true;
         puzzle.completedAt = Date.now();
@@ -794,6 +794,59 @@ export const gameService = {
           lobby.id,
         ),
       );
+    });
+  },
+
+  /**
+   * Authoritatively verifies whether a player's board arrangement is solved.
+   * Client NEVER decides completion; server independently validates against
+   * the canonical pieceId -> correctPosition mapping.
+   */
+  async verifyCompletion(code: string, playerId: string, token: string): Promise<boolean> {
+    const lobby = await lobbyService.getLobby(code);
+    return await withLobbyLock(lobby, async () => {
+      const player = findPlayer(lobby, playerId);
+      if (!player) throw new GameError("NOT_FOUND", "Player not found.", 404);
+      if (!safeEqual(token, player.token)) {
+        throw new GameError("FORBIDDEN", "Invalid player token.", 403);
+      }
+      if (lobby.status !== GameState.PUZZLE) {
+        throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
+      }
+      const puzzle = player.puzzle;
+      if (!puzzle) throw new GameError("INVALID_STATE", "No active puzzle for player.", 409);
+      if (puzzle.completed) return true;
+
+      const total = lobby.gridCols * lobby.gridRows;
+      const solved = isSolved(puzzle.board, total);
+      if (!solved) {
+        throw new GameError("BAD_REQUEST", "Puzzle arrangement is not solved.", 400);
+      }
+
+      puzzle.completed = true;
+      puzzle.completedAt = Date.now();
+      await lobbyRepo.put(lobby);
+
+      manager.sendToPlayer(
+        code,
+        player.id,
+        ev(
+          EventType.PUZZLE_MOVE,
+          {
+            board: puzzle.board,
+            moves: puzzle.moves,
+            correctSlots: correctSlots(puzzle.board),
+            completed: true,
+          },
+          lobby.id,
+        ),
+      );
+      manager.broadcast(
+        code,
+        ev(EventType.PLAYER_COMPLETED, { playerId: player.id, at: puzzle.completedAt }, lobby.id),
+      );
+      await gameService.finish(lobby, player);
+      return true;
     });
   },
 

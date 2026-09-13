@@ -47,6 +47,13 @@ export async function POST(
           action.data.to,
         );
         break;
+      case "COMPLETE":
+        await gameService.verifyCompletion(
+          code,
+          action.data.playerId,
+          action.data.token,
+        );
+        break;
       case "PLAY_AGAIN":
         await gameService.playAgain(code, action.data.token);
         break;

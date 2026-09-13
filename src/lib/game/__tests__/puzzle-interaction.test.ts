@@ -255,4 +255,62 @@ describe("Puzzle Interaction Engine — Tap & Drag Invariants", () => {
     expect(swapped[0]).toBe(0);
     expect(swapped.length).toBe(16);
   });
+
+  describe("Completion Lifecycle & Move Prevention", () => {
+    it("executes the 6 swap steps and prevents further moves once solved", () => {
+      // Setup board that is 1 swap away from solved
+      // [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      let board = [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+      let completed = false;
+      let completedCount = 0;
+      let completionRequests = 0;
+      let moves = 0;
+
+      const handleSwap = (from: number, to: number) => {
+        // Step 6: Prevent further moves after SOLVED
+        if (completed) {
+          return;
+        }
+
+        // Step 1: Update the board state
+        board = swapPieces(board, from, to);
+        moves++;
+
+        // Step 2: Recalculate which positions are correct
+        const recalculatedCorrect = correctSlots(board);
+        expect(recalculatedCorrect.length).toBe(16);
+
+        // Step 3: Check ALL 16 positions against the solved mapping
+        const solved = isSolved(board, 16);
+
+        // Step 4: If all 16 are correct, mark the puzzle SOLVED exactly once
+        if (solved && !completed) {
+          completed = true;
+          completedCount++;
+          // Step 5: Send exactly one completion request/event to the server
+          completionRequests++;
+        }
+      };
+
+      // Perform the winning swap (0 and 1)
+      handleSwap(0, 1);
+
+      expect(board).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+      expect(completed).toBe(true);
+      expect(completedCount).toBe(1);
+      expect(completionRequests).toBe(1);
+      expect(moves).toBe(1);
+
+      // Attempt another move after SOLVED
+      handleSwap(2, 3);
+
+      // Verify that further moves were prevented
+      expect(moves).toBe(1);
+      expect(completedCount).toBe(1);
+      expect(completionRequests).toBe(1);
+      expect(board[2]).toBe(2);
+      expect(board[3]).toBe(3);
+    });
+  });
 });
+
