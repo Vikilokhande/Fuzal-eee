@@ -21,42 +21,160 @@
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
 import type { GameEvent, EventType } from "./types";
 
+import { isTransientDbError } from "./repo";
+
 export interface Subscriber {
   /** `host:<tokenhash>` for the big screen, the player id for phones. */
   id: string;
   send: (frame: string, eventId?: number) => void;
 }
 
-/** Records an event in Supabase lobby_events and returns its authoritative cursor id. */
-async function persistEvent(
+/** Records an event in Supabase lobby_events and returns its authoritative cursor id.
+ * Non-authoritative event history write: bounded retries with fast backoff,
+ * idempotency deduplication, and non-blocking timeout handling.
+ */
+export async function persistEvent(
   code: string,
   event: GameEvent,
   targetId?: string | null,
   gameId?: string | null,
 ): Promise<number | undefined> {
   if (!isSupabaseConfigured()) return undefined;
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("lobby_events")
-      .insert({
-        lobby_code: code.toUpperCase(),
-        game_id: gameId ?? null,
-        event_type: event.type,
-        payload: event.payload as any,
-        target_id: targetId ?? null,
-      })
-      .select("id")
-      .single();
 
-    if (error) {
-      console.warn(`[EVENT_PERSIST_WARN] ${event.type}:`, error.message);
-      return undefined;
+  const maxAttempts = 3;
+  const timeoutMs = 1500;
+  const startTime = Date.now();
+  const upperCode = code.toUpperCase();
+  const payloadObj = (event.payload ?? {}) as Record<string, any>;
+  const actionId = payloadObj.actionId ? String(payloadObj.actionId) : null;
+  const previousGameId = payloadObj.previousGameId ? String(payloadObj.previousGameId) : null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Idempotency check on retry: if attempt > 1, verify whether the event was already persisted
+      // in PostgreSQL before the previous attempt timed out on the gateway.
+      if (attempt > 1) {
+        const checkCtrl = new AbortController();
+        const checkHandle = setTimeout(() => checkCtrl.abort(), 1000);
+        try {
+          if (actionId) {
+            const { data: existing } = await supabaseAdmin
+              .from("lobby_events")
+              .select("id")
+              .eq("lobby_code", upperCode)
+              .eq("payload->>actionId", actionId)
+              .abortSignal(checkCtrl.signal)
+              .limit(1)
+              .maybeSingle();
+            if (existing?.id) return Number(existing.id);
+          } else if (event.type === "GAME_CLOSED" && previousGameId) {
+            const { data: existing } = await supabaseAdmin
+              .from("lobby_events")
+              .select("id")
+              .eq("lobby_code", upperCode)
+              .eq("event_type", "GAME_CLOSED")
+              .eq("payload->>previousGameId", previousGameId)
+              .abortSignal(checkCtrl.signal)
+              .limit(1)
+              .maybeSingle();
+            if (existing?.id) return Number(existing.id);
+          } else if (event.type === "LOBBY_RESET" && previousGameId) {
+            const { data: existing } = await supabaseAdmin
+              .from("lobby_events")
+              .select("id")
+              .eq("lobby_code", upperCode)
+              .eq("event_type", "LOBBY_RESET")
+              .eq("payload->>previousGameId", previousGameId)
+              .abortSignal(checkCtrl.signal)
+              .limit(1)
+              .maybeSingle();
+            if (existing?.id) return Number(existing.id);
+          }
+        } catch {
+          // Ignore idempotency check timeout, fall through to insertion attempt
+        } finally {
+          clearTimeout(checkHandle);
+        }
+      }
+
+      // Bounded insert with AbortSignal timeout to prevent hanging on gateway timeout
+      const controller = new AbortController();
+      const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+      let insertRes: { data: any; error: any };
+      try {
+        insertRes = await supabaseAdmin
+          .from("lobby_events")
+          .insert({
+            lobby_code: upperCode,
+            game_id: gameId ?? null,
+            event_type: event.type,
+            payload: event.payload as any,
+            target_id: targetId ?? null,
+          })
+          .select("id")
+          .abortSignal(controller.signal)
+          .single();
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+
+      const { data, error } = insertRes;
+
+      if (!error && data?.id) {
+        return Number(data.id);
+      }
+
+      const isTransient = isTransientDbError(error);
+      const isLast = attempt === maxAttempts;
+
+      if (!isTransient || isLast) {
+        console.warn(`[EVENT_PERSIST_WARN] ${event.type}: ${error?.message ?? "Gateway Timeout"}`, {
+          operation: "persist_event",
+          eventType: event.type,
+          lobbyCode: upperCode,
+          gameId: gameId ?? null,
+          actionId,
+          attempt,
+          maxAttempts,
+          totalDurationMs: Date.now() - startTime,
+          errorName: error?.name ?? "DatabaseError",
+          errorMessage: error?.message ?? "Unknown error",
+          errorCode: error?.code ?? null,
+        });
+        return undefined;
+      }
+
+      // Short backoff: attempt 1 -> 50ms, attempt 2 -> 150ms
+      const backoffMs = attempt === 1 ? 50 : 150;
+      await new Promise((r) => setTimeout(r, backoffMs));
+    } catch (thrown: any) {
+      const isTransient = isTransientDbError(thrown) || thrown?.name === "AbortError";
+      const isLast = attempt === maxAttempts;
+
+      if (!isTransient || isLast) {
+        console.warn(`[EVENT_PERSIST_WARN] ${event.type}: ${thrown?.message ?? "Timeout exception"}`, {
+          operation: "persist_event",
+          eventType: event.type,
+          lobbyCode: upperCode,
+          gameId: gameId ?? null,
+          actionId,
+          attempt,
+          maxAttempts,
+          totalDurationMs: Date.now() - startTime,
+          errorName: thrown?.name ?? "Exception",
+          errorMessage: thrown?.message ?? "Unknown exception",
+          errorCode: thrown?.code ?? null,
+        });
+        return undefined;
+      }
+
+      const backoffMs = attempt === 1 ? 50 : 150;
+      await new Promise((r) => setTimeout(r, backoffMs));
     }
-    return data?.id ? Number(data.id) : undefined;
-  } catch (err: any) {
-    console.warn(`[EVENT_PERSIST_ERR] ${event.type}:`, err?.message);
-    return undefined;
   }
+
+  return undefined;
 }
 
 /** Fetches missed events after a given monotonic cursor */

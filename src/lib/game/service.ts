@@ -434,7 +434,29 @@ export const lobbyService = {
     code: string,
     opts: { hostToken?: string; playerId?: string; playerToken?: string },
   ): Promise<{ lobby: Lobby; kind: "host" | "player"; player?: Player }> {
-    const lobby = await this.getLobby(code);
+    const fastLobby = lobbyRepo.getByCodeFast?.(code);
+    const now = Date.now();
+    const needsTransition =
+      fastLobby &&
+      ((fastLobby.status === GameState.MEMORY && fastLobby.memory?.endsAt && now >= fastLobby.memory.endsAt) ||
+        (fastLobby.status === GameState.PUZZLE && fastLobby.puzzleEndsAt && now >= fastLobby.puzzleEndsAt));
+
+    let lobby: Lobby;
+    if (
+      !needsTransition &&
+      fastLobby &&
+      ((opts.hostToken && safeEqual(opts.hostToken, fastLobby.hostToken)) ||
+        (opts.playerId &&
+          opts.playerToken &&
+          fastLobby.players.some(
+            (p) => p.id === opts.playerId && safeEqual(opts.playerToken!, p.token),
+          )))
+    ) {
+      lobby = fastLobby;
+    } else {
+      lobby = await this.getLobby(code);
+    }
+
     if (opts.hostToken) {
       if (!safeEqual(opts.hostToken, lobby.hostToken)) {
         throw new GameError("FORBIDDEN", "Invalid host token.", 403);
@@ -664,7 +686,7 @@ export const gameService = {
   /** Authoritative phase reconciliation & safe lazy transition */
   async ensureAuthoritativePhase(code: string): Promise<Lobby> {
     const normCode = code.toUpperCase();
-    const lobby = await lobbyRepo.getByCode(normCode);
+    const lobby = lobbyRepo.getByCodeFast?.(normCode) ?? (await lobbyRepo.getByCode(normCode));
     if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
 
     const now = Date.now();
@@ -691,7 +713,7 @@ export const gameService = {
         puzzleEndsAt: lobby.puzzleEndsAt ?? null,
       });
       await gameService.beginPuzzle(normCode, true);
-      return (await lobbyRepo.getByCode(normCode)) ?? lobby;
+      return lobbyRepo.getByCodeFast?.(normCode) ?? (await lobbyRepo.getByCode(normCode)) ?? lobby;
     }
 
     if (
@@ -709,7 +731,7 @@ export const gameService = {
         puzzleEndsAt: lobby.puzzleEndsAt,
       });
       await gameService.handlePuzzleTimeout(normCode);
-      return (await lobbyRepo.getByCode(normCode)) ?? lobby;
+      return lobbyRepo.getByCodeFast?.(normCode) ?? (await lobbyRepo.getByCode(normCode)) ?? lobby;
     }
 
     return lobby;
@@ -827,7 +849,7 @@ export const gameService = {
 
   /** MEMORY → PUZZLE (also called by the hard server timeout) */
   async beginPuzzle(code: string, force = (process.env.NODE_ENV === "test")): Promise<void> {
-    const lobby = await lobbyRepo.getByCode(code);
+    const lobby = lobbyRepo.getByCodeFast?.(code) ?? (await lobbyRepo.getByCode(code));
     if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     await withLobbyLock(lobby, async () => {
       if (lobby.status === GameState.PUZZLE) {
@@ -1287,7 +1309,11 @@ export const gameService = {
     clientGameId?: string | null,
     actionId?: string,
   ): Promise<boolean> {
-    const lobby = await lobbyService.getLobby(code);
+    const fastLobby = lobbyRepo.getByCodeFast?.(code);
+    const lobby =
+      fastLobby && fastLobby.status === GameState.PUZZLE
+        ? fastLobby
+        : await lobbyService.getLobby(code);
     return await withLobbyLock(lobby, async () => {
       const player = findPlayer(lobby, playerId);
       if (!player) throw new GameError("NOT_FOUND", "Player not found.", 404);

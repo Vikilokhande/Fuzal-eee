@@ -91,6 +91,9 @@ export async function POST(
         await gameService.backToLobby(code, action.data.token);
         break;
     }
+    // Authoritative Reliability Invariant:
+    // Once authoritative mutation succeeds, non-authoritative event-history timeouts
+    // never fail the user action or return 500.
     return Response.json({ ok: true });
   } catch (e) {
     return errorResponse(e);

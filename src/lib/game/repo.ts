@@ -70,9 +70,10 @@ export async function withDbRetry<T = any>(
   opName: string,
   fn: () => PromiseLike<{ data: T | null; error: any }>,
   maxRetries = 3,
-  baseDelayMs = 200,
+  baseDelayMs = 40,
 ): Promise<{ data: T | null; error: any }> {
   let res: { data: T | null; error: any } = { data: null, error: null };
+  const startTime = Date.now();
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       res = (await fn()) as { data: T; error: any };
@@ -82,18 +83,38 @@ export async function withDbRetry<T = any>(
         return res;
       }
 
-      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.random() * 50;
+      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.random() * 20;
       console.warn(
         `[REPO_RETRY] ${opName} hit transient error "${res.error.message}". Retrying (${attempt}/${maxRetries}) in ${Math.round(delay)}ms...`,
+        {
+          operation: opName,
+          attempt,
+          maxRetries,
+          delayMs: Math.round(delay),
+          totalDurationMs: Date.now() - startTime,
+          errorName: res.error?.name ?? "DatabaseError",
+          errorMessage: res.error?.message,
+          errorCode: res.error?.code ?? null,
+        },
       );
       await new Promise((r) => setTimeout(r, delay));
     } catch (thrown: any) {
       if (!isTransientDbError(thrown) || attempt === maxRetries) {
         return { data: null as any, error: thrown };
       }
-      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.random() * 50;
+      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.random() * 20;
       console.warn(
         `[REPO_RETRY] ${opName} threw transient exception "${thrown?.message}". Retrying (${attempt}/${maxRetries}) in ${Math.round(delay)}ms...`,
+        {
+          operation: opName,
+          attempt,
+          maxRetries,
+          delayMs: Math.round(delay),
+          totalDurationMs: Date.now() - startTime,
+          errorName: thrown?.name ?? "Exception",
+          errorMessage: thrown?.message ?? "Unknown exception",
+          errorCode: thrown?.code ?? null,
+        },
       );
       await new Promise((r) => setTimeout(r, delay));
     }
@@ -415,55 +436,81 @@ export class SupabaseLobbyRepository implements LobbyRepository {
       }
 
       // 4. Hydrate runtime player objects
-      const players: Player[] = (playerRows ?? []).map((row) => {
-        const existingPlayer = existingLobby?.players.find((p) => p.id === row.id);
-        const gp = gamePlayerMap.get(row.id);
+      // If get_players failed with a transient error but we already have valid players in memory,
+      // fall back to existingLobby.players so we NEVER wipe out players due to a DB hiccup!
+      let players: Player[];
+      if (playersRes.error && existingLobby?.players && existingLobby.players.length > 0) {
+        console.warn(
+          `[REPO_FALLBACK] Preserving ${existingLobby.players.length} in-memory players for ${normCode} after get_players error: ${playersRes.error.message}`,
+          {
+            operation: "get_players",
+            lobbyCode: normCode,
+            errorName: playersRes.error?.name ?? "DatabaseError",
+            errorMessage: playersRes.error?.message,
+            errorCode: playersRes.error?.code ?? null,
+          },
+        );
+        players = existingLobby.players;
+      } else {
+        players = (playerRows ?? []).map((row) => {
+          const existingPlayer = existingLobby?.players.find((p) => p.id === row.id);
+          const gp = gamePlayerMap.get(row.id);
 
-        const puzzle: PuzzleInstance | null = existingPlayer?.puzzle
-          ? {
-              ...existingPlayer.puzzle,
-              board:
-                gp && Array.isArray(gp.board)
-                  ? gp.board
-                  : existingPlayer.puzzle.board,
-              moves: gp?.moves ?? existingPlayer.puzzle.moves,
-              completed:
-                existingPlayer.puzzle.completed || (gp?.completed ?? false),
-              completedAt:
-                existingPlayer.puzzle.completedAt ??
-                (gp?.completed_at
-                  ? new Date(gp.completed_at).getTime()
-                  : null),
-            }
-          : gp
+          const puzzle: PuzzleInstance | null = existingPlayer?.puzzle
             ? {
-                board: Array.isArray(gp.board) ? gp.board : [],
-                moves: gp.moves ?? 0,
-                startedAt: gp.started_at
-                  ? new Date(gp.started_at).getTime()
-                  : Date.now(),
-                completed: gp.completed ?? false,
-                completedAt: gp.completed_at
-                  ? new Date(gp.completed_at).getTime()
-                  : null,
+                ...existingPlayer.puzzle,
+                board:
+                  gp && Array.isArray(gp.board)
+                    ? gp.board
+                    : existingPlayer.puzzle.board,
+                moves: gp?.moves ?? existingPlayer.puzzle.moves,
+                completed:
+                  existingPlayer.puzzle.completed || (gp?.completed ?? false),
+                completedAt:
+                  existingPlayer.puzzle.completedAt ??
+                  (gp?.completed_at
+                    ? new Date(gp.completed_at).getTime()
+                    : null),
+                version:
+                  existingPlayer.puzzle.version ??
+                  (gp?.version !== undefined && gp?.version !== null
+                    ? Number(gp.version)
+                    : existingLobby?.version),
               }
-            : null;
+            : gp
+              ? {
+                  board: Array.isArray(gp.board) ? gp.board : [],
+                  moves: gp.moves ?? 0,
+                  startedAt: gp.started_at
+                    ? new Date(gp.started_at).getTime()
+                    : Date.now(),
+                  completed: gp.completed ?? false,
+                  completedAt: gp.completed_at
+                    ? new Date(gp.completed_at).getTime()
+                    : null,
+                  version:
+                    gp.version !== undefined && gp.version !== null
+                      ? Number(gp.version)
+                      : existingLobby?.version,
+                }
+              : null;
 
-        return {
-          id: row.id,
-          name: row.name,
-          token: row.player_token_hash,
-          joinedAt: new Date(row.joined_at).getTime(),
-          connectionStatus:
-            existingPlayer?.connectionStatus ??
-            (row.connected
-              ? PlayerConnection.CONNECTED
-              : PlayerConnection.DISCONNECTED),
-          score: row.score ?? 0,
-          slot: row.slot,
-          puzzle,
-        };
-      });
+          return {
+            id: row.id,
+            name: row.name,
+            token: row.player_token_hash,
+            joinedAt: new Date(row.joined_at).getTime(),
+            connectionStatus:
+              existingPlayer?.connectionStatus ??
+              (row.connected
+                ? PlayerConnection.CONNECTED
+                : PlayerConnection.DISCONNECTED),
+            score: row.score ?? 0,
+            slot: row.slot,
+            puzzle,
+          };
+        });
+      }
 
       // 5. Reconstruct memory phase if active
       let memory = existingLobby?.memory ?? null;
@@ -514,6 +561,7 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           gridCols,
           gridRows,
           pieceCount,
+          version: lobbyRow.version ?? existingLobby?.version ?? 1,
           currentGameId: lobbyRow.current_game_id ?? null,
           memory,
           puzzleStartedAt,
@@ -534,6 +582,9 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         lobby.gridCols = gridCols;
         lobby.gridRows = gridRows;
         lobby.pieceCount = pieceCount;
+        if (lobbyRow.version !== undefined && lobbyRow.version !== null) {
+          lobby.version = Math.max(lobby.version ?? 1, Number(lobbyRow.version));
+        }
         lobby.currentGameId = lobbyRow.current_game_id ?? null;
         lobby.players = players;
         lobby.memory = memory;
