@@ -31,26 +31,27 @@ function mockRouteDeps() {
     },
   }));
   vi.doMock("@/lib/game/puzzlePiecesData", () => ({
-    getAllPiecesForSlug: vi.fn(() => null),
-    getPieceBuffer: vi.fn(() => null),
-  }));
-  vi.doMock("@/lib/game/slicer", () => ({
-    sliceAllPieces: vi.fn(async (_slug: string, n: number) => {
-      return Object.fromEntries(
+    getEmbeddedAllPieces: vi.fn((_slug: string, n: number) =>
+      Object.fromEntries(
         Array.from({ length: n * n }, (_, pieceId) => [
           pieceId,
           `data:image/webp;base64,piece-${pieceId}`,
         ]),
-      );
-    }),
-    slicePiece: vi.fn(async (_slug: string, _n: number, pieceId: number) =>
+      ),
+    ),
+    getEmbeddedPieceBuffer: vi.fn((_slug: string, _n: number, pieceId: number) =>
       Buffer.from(`piece-${pieceId}`),
     ),
   }));
   vi.doMock("@/lib/supabase/admin", () => ({
     supabaseAdmin: {
       storage: {
-        from: vi.fn(),
+        from: vi.fn(() => ({
+          download: vi.fn(async (path: string) => ({
+            data: new Blob([Buffer.from(`storage-${path}`)]),
+            error: null,
+          })),
+        })),
       },
     },
   }));
@@ -62,7 +63,6 @@ describe("dynamic puzzle piece routes", () => {
     vi.restoreAllMocks();
     vi.doUnmock("@/lib/game/repo");
     vi.doUnmock("@/lib/game/puzzlePiecesData");
-    vi.doUnmock("@/lib/game/slicer");
     vi.doUnmock("@/lib/supabase/admin");
   });
 
@@ -86,6 +86,23 @@ describe("dynamic puzzle piece routes", () => {
     expect(body.pieces[16]).toBeUndefined();
   });
 
+  it("returns HTTP 200 with image/webp for a valid piece request", async () => {
+    mockRouteDeps();
+    const { GET } = await import("@/app/api/lobbies/[code]/piece/[pieceId]/route");
+
+    const res = await GET(
+      new Request(
+        "http://localhost:3000/api/lobbies/ABCD/piece/5?p=11111111-1111-4111-8111-111111111111&t=xxxxxxxxxxxxxxxxxxxxxxxx",
+      ),
+      { params: Promise.resolve({ code: "ABCD", pieceId: "5" }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("image/webp");
+    const bytes = await res.arrayBuffer();
+    expect(bytes.byteLength).toBeGreaterThan(0);
+  });
+
   it("rejects a single piece outside the active puzzle size", async () => {
     mockRouteDeps();
     const { GET } = await import("@/app/api/lobbies/[code]/piece/[pieceId]/route");
@@ -102,3 +119,4 @@ describe("dynamic puzzle piece routes", () => {
     expect(body.error).toBe("BAD_REQUEST");
   });
 });
+

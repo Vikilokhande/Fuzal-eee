@@ -368,11 +368,29 @@ export function PuzzleBoard({
     >
       {/* Loading overlay while preloading tiles */}
       {!ready && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-2xl bg-black/75 backdrop-blur-sm">
-          <span className="h-10 w-10 animate-spin rounded-full border-4 border-cyan-300 border-t-transparent" />
-          <p className="text-xs font-bold uppercase tracking-[0.25em] text-cyan-300">
-            Loading {Math.min(displayLoaded, total)}/{total} pieces...
-          </p>
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-2xl bg-black/80 backdrop-blur-sm p-4 text-center">
+          {error ? (
+            <>
+              <p className="text-sm font-bold text-rose-400">Failed to load puzzle pieces</p>
+              <p className="text-xs text-indigo-200/70">{error}</p>
+              {onRetry && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="btn-primary mt-2 px-4 py-1.5 text-xs"
+                >
+                  Retry Loading
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="h-10 w-10 animate-spin rounded-full border-4 border-cyan-300 border-t-transparent" />
+              <p className="text-xs font-bold uppercase tracking-[0.25em] text-cyan-300">
+                Loading {Math.min(displayLoaded, total)}/{total} pieces...
+              </p>
+            </>
+          )}
         </div>
       )}
 

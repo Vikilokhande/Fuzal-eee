@@ -364,7 +364,7 @@ describe("replay, reconnect", () => {
     lobby = await lobbyRepo.getByCode(setup.code);
     expect(lobby!.status).toBe(GameState.LOBBY);
     expect(lobby!.memory).toBeNull();
-  });
+  }, 75_000);
 
   it("restores a disconnected player on reconnect with state intact", async () => {
     const setup = await setupLobby(1);

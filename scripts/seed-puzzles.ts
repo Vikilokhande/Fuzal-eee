@@ -21,10 +21,7 @@ const supabase = createClient(supabaseUrl, serviceRoleKey, {
 
 const BUCKET_NAME = "puzzle-images";
 const TARGET_SIZE = 900;
-const GRID_ROWS = 3;
-const GRID_COLS = 3;
-const TILE_WIDTH = TARGET_SIZE / GRID_COLS; // 300
-const TILE_HEIGHT = TARGET_SIZE / GRID_ROWS; // 300
+const SUPPORTED_GRID_SIZES = [2, 3, 4, 5, 6, 7, 8] as const;
 
 interface PuzzleDef {
   file: string;
@@ -40,8 +37,11 @@ const PUZZLES: PuzzleDef[] = [
   { file: "image_005.svg", slug: "abstract-geometry", name: "Abstract Geometry" },
 ];
 
+/** Store base64 data for embedded bundle: slug -> gridSize -> pieceId -> base64 */
+const embeddedData: Record<string, Record<number, Record<number, string>>> = {};
+
 async function seedPuzzles() {
-  console.log("🧩 Starting Fuzal Puzzle Seed Process...");
+  console.log("🧩 Starting Fuzal Full Puzzle Pre-Generation & Storage Seed Process...");
 
   // Ensure storage bucket exists
   const { data: buckets, error: bucketError } = await supabase.storage.listBuckets();
@@ -58,6 +58,7 @@ async function seedPuzzles() {
 
   for (const puzzle of PUZZLES) {
     console.log(`\n🎨 Processing puzzle: ${puzzle.name} (${puzzle.slug})...`);
+    embeddedData[puzzle.slug] = {};
     const srcPath = path.join(process.cwd(), "public", "images", puzzle.file);
 
     let srcBuffer: Buffer;
@@ -68,7 +69,7 @@ async function seedPuzzles() {
       continue;
     }
 
-    // 1. Render master 800x800 square image as WebP
+    // 1. Render canonical master 900x900 square image as WebP
     const masterWebPBuffer = await sharp(srcBuffer, { density: 200 })
       .resize(TARGET_SIZE, TARGET_SIZE, { fit: "cover" })
       .webp({ quality: 90 })
@@ -89,35 +90,80 @@ async function seedPuzzles() {
     }
     console.log(`  ✓ Uploaded original: ${originalPath}`);
 
-    // 3. Slice into 9 tiles (3x3)
     const masterSharp = sharp(masterWebPBuffer);
-    for (let pieceId = 0; pieceId < GRID_ROWS * GRID_COLS; pieceId++) {
-      const col = pieceId % GRID_COLS;
-      const row = Math.floor(pieceId / GRID_COLS);
-      const left = col * TILE_WIDTH;
-      const top = row * TILE_HEIGHT;
 
-      const tileBuffer = await masterSharp
-        .clone()
-        .extract({ left, top, width: TILE_WIDTH, height: TILE_HEIGHT })
-        .webp({ quality: 92 })
-        .toBuffer();
+    // 3. Pre-generate all pieces for all 7 supported sizes: 2x2, 3x3, 4x4, 5x5, 6x6, 7x7, 8x8
+    for (const N of SUPPORTED_GRID_SIZES) {
+      embeddedData[puzzle.slug][N] = {};
+      const totalPieces = N * N;
+      console.log(`  ✂️ Slicing ${N}x${N} (${totalPieces} pieces)...`);
 
-      const pieceNumStr = String(pieceId).padStart(2, "0");
-      const piecePath = `${puzzle.slug}/pieces/${pieceNumStr}.webp`;
+      const uploadTasks: Promise<void>[] = [];
 
-      const { error: tileUploadErr } = await supabase.storage
-        .from(BUCKET_NAME)
-        .upload(piecePath, tileBuffer, {
-          contentType: "image/webp",
-          upsert: true,
-        });
+      for (let pieceId = 0; pieceId < totalPieces; pieceId++) {
+        const col = pieceId % N;
+        const row = Math.floor(pieceId / N);
 
-      if (tileUploadErr) {
-        console.error(`  ✗ Failed to upload tile ${piecePath}:`, tileUploadErr.message);
+        const x0 = Math.floor((col * TARGET_SIZE) / N);
+        const x1 = Math.floor(((col + 1) * TARGET_SIZE) / N);
+        const y0 = Math.floor((row * TARGET_SIZE) / N);
+        const y1 = Math.floor(((row + 1) * TARGET_SIZE) / N);
+        const extractWidth = x1 - x0;
+        const extractHeight = y1 - y0;
+
+        const tileBuffer = await masterSharp
+          .clone()
+          .extract({
+            left: x0,
+            top: y0,
+            width: extractWidth,
+            height: extractHeight,
+          })
+          .webp({ quality: 90 })
+          .toBuffer();
+
+        const pieceNumStr = String(pieceId).padStart(2, "0");
+        const gridPiecePath = `${puzzle.slug}/pieces/${N}x${N}/${pieceNumStr}.webp`;
+
+        // Store in embedded data bundle (for 2x2, 3x3, 4x4 fast path)
+        if (N <= 4) {
+          embeddedData[puzzle.slug][N][pieceId] = `data:image/webp;base64,${tileBuffer.toString("base64")}`;
+        }
+
+        // Upload to grid-specific path in Supabase Storage
+        uploadTasks.push(
+          supabase.storage
+            .from(BUCKET_NAME)
+            .upload(gridPiecePath, tileBuffer, {
+              contentType: "image/webp",
+              upsert: true,
+            })
+            .then(({ error }) => {
+              if (error) console.error(`  ✗ Upload failed: ${gridPiecePath}`, error.message);
+            }),
+        );
+
+        // If N=4, ALSO upload to flat path `${puzzle.slug}/pieces/${pieceNumStr}.webp`
+        // so legacy/flat paths map to the 16-piece configuration
+        if (N === 4) {
+          const flatPiecePath = `${puzzle.slug}/pieces/${pieceNumStr}.webp`;
+          uploadTasks.push(
+            supabase.storage
+              .from(BUCKET_NAME)
+              .upload(flatPiecePath, tileBuffer, {
+                contentType: "image/webp",
+                upsert: true,
+              })
+              .then(({ error }) => {
+                if (error) console.error(`  ✗ Flat upload failed: ${flatPiecePath}`, error.message);
+              }),
+          );
+        }
       }
+
+      await Promise.all(uploadTasks);
+      console.log(`  ✓ Uploaded ${totalPieces} tiles for ${N}x${N}`);
     }
-    console.log(`  ✓ Uploaded all 9 pre-generated WebP tiles for ${puzzle.slug}`);
 
     // 4. Upsert row into puzzle_images table
     const { data: existingRows } = await supabase
@@ -134,8 +180,8 @@ async function seedPuzzles() {
           mime_type: "image/webp",
           width: TARGET_SIZE,
           height: TARGET_SIZE,
-          grid_rows: GRID_ROWS,
-          grid_columns: GRID_COLS,
+          grid_rows: 4,
+          grid_columns: 4,
           active: true,
         })
         .eq("id", existingRows[0].id);
@@ -149,8 +195,8 @@ async function seedPuzzles() {
           mime_type: "image/webp",
           width: TARGET_SIZE,
           height: TARGET_SIZE,
-          grid_rows: GRID_ROWS,
-          grid_columns: GRID_COLS,
+          grid_rows: 4,
+          grid_columns: 4,
           active: true,
         })
         .select("id")
@@ -164,7 +210,62 @@ async function seedPuzzles() {
     }
   }
 
-  console.log("\n🎉 All puzzle images and pieces successfully seeded!");
+  // 5. Generate embedded TypeScript bundle: src/lib/game/puzzlePiecesData.ts
+  const bundlePath = path.join(process.cwd(), "src", "lib", "game", "puzzlePiecesData.ts");
+  const tsContent = `/**
+ * Pre-generated WebP puzzle pieces bundle.
+ * Provides 0ms instant serving without runtime image processing or libvips dependency.
+ * Auto-generated by scripts/seed-puzzles.ts.
+ */
+
+export const EMBEDDED_PIECES: Record<
+  string,
+  Record<number, Record<number, string>>
+> = ${JSON.stringify(embeddedData, null, 2)};
+
+export function getEmbeddedPieceDataUrl(
+  slug: string,
+  gridSize: number,
+  pieceId: number,
+): string | null {
+  return EMBEDDED_PIECES[slug]?.[gridSize]?.[pieceId] ?? null;
+}
+
+export function getEmbeddedPieceBuffer(
+  slug: string,
+  gridSize: number,
+  pieceId: number,
+): Buffer | null {
+  const dataUrl = getEmbeddedPieceDataUrl(slug, gridSize, pieceId);
+  if (!dataUrl) return null;
+  const base64 = dataUrl.replace(/^data:image\\/webp;base64,/, "");
+  return Buffer.from(base64, "base64");
+}
+
+export function getEmbeddedAllPieces(
+  slug: string,
+  gridSize: number,
+): Record<number, string> | null {
+  const pieces = EMBEDDED_PIECES[slug]?.[gridSize];
+  if (!pieces) return null;
+  const total = gridSize * gridSize;
+  if (Object.keys(pieces).length < total) return null;
+  return pieces;
+}
+
+/** Legacy 3x3 helper for backward compatibility */
+export function getPieceBuffer(slug: string, pieceId: number): Buffer | null {
+  return getEmbeddedPieceBuffer(slug, 3, pieceId);
+}
+
+export function getAllPiecesForSlug(slug: string): Record<number, string> | null {
+  return getEmbeddedAllPieces(slug, 3);
+}
+`;
+
+  await fs.writeFile(bundlePath, tsContent, "utf-8");
+  console.log(`\n🎉 Pre-generated embedded bundle saved to: ${bundlePath}`);
+  console.log("🎉 All puzzle images and pieces successfully seeded into Supabase Storage!");
 }
 
 seedPuzzles().catch((err) => {
