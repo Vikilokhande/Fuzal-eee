@@ -99,6 +99,7 @@ async function claimClientAction(
   actionType: "SWAP" | "COMPLETE" | "BEGIN_PUZZLE",
   clientGameId?: string | null,
   actionId?: string,
+  version?: number,
 ): Promise<boolean> {
   if (clientGameId && clientGameId !== lobby.currentGameId) {
     console.warn("[ACTION_REJECTED]", {
@@ -142,6 +143,7 @@ async function claimClientAction(
         player_id: playerId,
         action_id: actionId,
         action_type: actionType,
+        version: version ?? lobby.version ?? 1,
       }),
     1,
   );
@@ -337,29 +339,7 @@ export const lobbyService = {
   },
 
   async getLobby(code: string): Promise<Lobby> {
-    const lobby = await lobbyRepo.getByCode(code);
-    if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
-
-    const now = Date.now();
-    if (
-      lobby.status === GameState.MEMORY &&
-      lobby.memory?.endsAt &&
-      now >= lobby.memory.endsAt
-    ) {
-      await gameService.beginPuzzle(code);
-      return (await lobbyRepo.getByCode(code)) ?? lobby;
-    }
-
-    if (
-      lobby.status === GameState.PUZZLE &&
-      lobby.puzzleEndsAt &&
-      now >= lobby.puzzleEndsAt
-    ) {
-      await gameService.handlePuzzleTimeout(code);
-      return (await lobbyRepo.getByCode(code)) ?? lobby;
-    }
-
-    return lobby;
+    return await gameService.ensureAuthoritativePhase(code);
   },
 
   /** Sanitized view for the pre-join page – never leaks tokens/boards. */
@@ -681,9 +661,64 @@ function assertHost(lobby: Lobby, token: string) {
 }
 
 export const gameService = {
+  /** Authoritative phase reconciliation & safe lazy transition */
+  async ensureAuthoritativePhase(code: string): Promise<Lobby> {
+    const normCode = code.toUpperCase();
+    const lobby = await lobbyRepo.getByCode(normCode);
+    if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
+
+    const now = Date.now();
+    console.log("[PHASE_READ]", {
+      gameId: lobby.currentGameId ?? null,
+      status: lobby.status,
+      serverNow: now,
+      memoryEndsAt: lobby.memory?.endsAt ?? null,
+      puzzleEndsAt: lobby.puzzleEndsAt ?? null,
+    });
+
+    if (
+      lobby.status === GameState.MEMORY &&
+      lobby.memory?.endsAt &&
+      now >= lobby.memory.endsAt
+    ) {
+      console.log("[PHASE_TRANSITION]", {
+        gameId: lobby.currentGameId ?? null,
+        oldStatus: GameState.MEMORY,
+        newStatus: GameState.PUZZLE,
+        reason: "EXPIRED_MEMORY_LAZY_TRANSITION",
+        serverNow: now,
+        memoryEndsAt: lobby.memory.endsAt,
+        puzzleEndsAt: lobby.puzzleEndsAt ?? null,
+      });
+      await gameService.beginPuzzle(normCode, true);
+      return (await lobbyRepo.getByCode(normCode)) ?? lobby;
+    }
+
+    if (
+      lobby.status === GameState.PUZZLE &&
+      lobby.puzzleEndsAt &&
+      now >= lobby.puzzleEndsAt
+    ) {
+      console.log("[PHASE_TRANSITION]", {
+        gameId: lobby.currentGameId ?? null,
+        oldStatus: GameState.PUZZLE,
+        newStatus: GameState.FINISHED,
+        reason: "PUZZLE_TIMEOUT_LAZY_TRANSITION",
+        serverNow: now,
+        memoryEndsAt: lobby.memory?.endsAt ?? null,
+        puzzleEndsAt: lobby.puzzleEndsAt,
+      });
+      await gameService.handlePuzzleTimeout(normCode);
+      return (await lobbyRepo.getByCode(normCode)) ?? lobby;
+    }
+
+    return lobby;
+  },
+
   /** LOBBY → MEMORY */
   async startGame(code: string, hostToken: string): Promise<void> {
-    const lobby = await lobbyService.getLobby(code);
+    const lobby = await lobbyRepo.getByCode(code);
+    if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     await withLobbyLock(lobby, async () => {
       assertHost(lobby, hostToken);
       assertTransition(lobby, GameState.MEMORY);
@@ -695,6 +730,7 @@ export const gameService = {
       const durationSeconds = config.memorySeconds;
       const startedAt = Date.now();
       const endsAt = startedAt + durationSeconds * 1000;
+      lobby.version = 1;
       lobby.status = GameState.MEMORY;
       lobby.memory = { image, startedAt, endsAt, durationSeconds };
       lobby.winnerId = null;
@@ -790,12 +826,36 @@ export const gameService = {
   },
 
   /** MEMORY → PUZZLE (also called by the hard server timeout) */
-  async beginPuzzle(code: string): Promise<void> {
+  async beginPuzzle(code: string, force = (process.env.NODE_ENV === "test")): Promise<void> {
     const lobby = await lobbyRepo.getByCode(code);
     if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     await withLobbyLock(lobby, async () => {
-      if (lobby.status === GameState.PUZZLE) return; // idempotent re-entry
+      if (lobby.status === GameState.PUZZLE) {
+        console.log("[BEGIN_PUZZLE_ALREADY_ACTIVE]", {
+          gameId: lobby.currentGameId ?? null,
+          status: lobby.status,
+        });
+        return; // idempotent re-entry
+      }
       if (lobby.status === GameState.FINISHED) return; // cannot move back to PUZZLE if finished
+
+      const now = Date.now();
+      const clockSkewToleranceMs = 500;
+      if (
+        !force &&
+        lobby.status === GameState.MEMORY &&
+        lobby.memory?.endsAt &&
+        now + clockSkewToleranceMs < lobby.memory.endsAt
+      ) {
+        console.warn("[BEGIN_PUZZLE_PREMATURE_REJECTED]", {
+          gameId: lobby.currentGameId ?? null,
+          now,
+          memoryEndsAt: lobby.memory.endsAt,
+          remainingMs: lobby.memory.endsAt - now,
+        });
+        return; // Guard: do not cut memory countdown short
+      }
+
       assertTransition(lobby, GameState.PUZZLE);
       clearLobbyTimers(lobby);
 
@@ -840,19 +900,37 @@ export const gameService = {
         }
       }
 
+      const oldStatus = lobby.status;
       lobby.status = GameState.PUZZLE;
       lobby.puzzleStartedAt = startedAt;
       lobby.puzzleEndsAt = endsAt;
       lobby.puzzleDurationSeconds = durationSeconds;
+      lobby.version = (lobby.version || 1);
       const total = lobby.gridCols * lobby.gridRows;
       lobby.pieceCount = total;
       const gameId = lobby.currentGameId ?? null;
+
+      console.log("[BEGIN_PUZZLE_ACCEPTED]", {
+        gameId,
+        serverNow: startedAt,
+        memoryEndsAt: lobby.memory?.endsAt ?? null,
+        puzzleEndsAt: endsAt,
+      });
+      console.log("[PHASE_TRANSITION]", {
+        gameId,
+        oldStatus,
+        newStatus: GameState.PUZZLE,
+        serverNow: startedAt,
+        memoryEndsAt: lobby.memory?.endsAt ?? null,
+        puzzleEndsAt: endsAt,
+      });
       console.log("[PUZZLE_INIT]", {
         gameId,
         pieceCount: total,
         rows: lobby.gridRows,
         cols: lobby.gridCols,
       });
+
       for (const p of lobby.players) {
         // Every player receives an independent shuffle if not already initialized.
         if (!p.puzzle || p.puzzle.board.length !== total) {
@@ -863,7 +941,10 @@ export const gameService = {
             completed: false,
             completedAt: null,
             eliminated: false,
+            version: lobby.version,
           };
+        } else {
+          p.puzzle.version = lobby.version;
         }
         p.eliminated = false;
       }
@@ -997,13 +1078,16 @@ export const gameService = {
     actionId?: string,
   ): Promise<{
     gameId: string | null;
+    actionId?: string | null;
+    version: number;
     board: number[];
     moves: number;
     correctSlots: boolean[];
     completed: boolean;
     status: GameState;
   }> {
-    const lobby = await lobbyService.getLobby(code);
+    const lobby = lobbyRepo.getByCodeFast?.(code) ?? (await lobbyRepo.getByCode(code));
+    if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     return await withLobbyLock(lobby, async () => {
       const player = findPlayer(lobby, playerId);
       if (!player) throw new GameError("NOT_FOUND", "Player not found.", 404);
@@ -1017,10 +1101,13 @@ export const gameService = {
         "SWAP",
         clientGameId,
         actionId,
+        player.puzzle?.version ?? lobby.version,
       );
       if (!claimed) {
         return {
           gameId: lobby.currentGameId ?? null,
+          actionId: actionId ?? null,
+          version: player.puzzle?.version ?? lobby.version ?? 1,
           board: player.puzzle?.board ?? [],
           moves: player.puzzle?.moves ?? 0,
           correctSlots: player.puzzle ? correctSlots(player.puzzle.board) : [],
@@ -1054,6 +1141,8 @@ export const gameService = {
       if (from === to) {
         return {
           gameId,
+          actionId: actionId ?? null,
+          version: puzzle.version ?? lobby.version ?? 1,
           board: puzzle.board,
           moves: puzzle.moves,
           correctSlots: correctSlots(puzzle.board),
@@ -1061,12 +1150,17 @@ export const gameService = {
           status: lobby.status,
         };
       }
+
+      // Monotonically increase authoritative version
+      lobby.version = (lobby.version || 0) + 1;
+      puzzle.version = lobby.version;
+
       console.log("[ACTION_ACCEPTED]", {
         actionId: actionId ?? null,
         gameId,
         playerId,
         actionType: "SWAP",
-        version: null,
+        version: puzzle.version,
       });
 
       const before = [...puzzle.board];
@@ -1102,6 +1196,7 @@ export const gameService = {
               pieceCount: total,
               gameId,
               actionId,
+              version: puzzle.version,
             },
             lobby.id,
             gameId,
@@ -1119,6 +1214,8 @@ export const gameService = {
         await gameService.finish(lobby, player);
         return {
           gameId,
+          actionId: actionId ?? null,
+          version: puzzle.version,
           board: puzzle.board,
           moves: puzzle.moves,
           correctSlots: correctSlots(puzzle.board),
@@ -1127,7 +1224,13 @@ export const gameService = {
         };
       }
 
-      await lobbyRepo.put(lobby);
+      // Fast-path persistence: updates single player row in game_players rather than 8-table cascade
+      if (lobbyRepo.savePlayerSwap) {
+        await lobbyRepo.savePlayerSwap(lobby, player.id, actionId);
+      } else {
+        await lobbyRepo.put(lobby);
+      }
+
       await manager.sendToPlayer(
         code,
         player.id,
@@ -1141,6 +1244,7 @@ export const gameService = {
             pieceCount: total,
             gameId,
             actionId,
+            version: puzzle.version,
           },
           lobby.id,
           gameId,
@@ -1160,6 +1264,8 @@ export const gameService = {
 
       return {
         gameId,
+        actionId: actionId ?? null,
+        version: puzzle.version,
         board: puzzle.board,
         moves: puzzle.moves,
         correctSlots: correctSlots(puzzle.board),
@@ -1195,6 +1301,7 @@ export const gameService = {
         "COMPLETE",
         clientGameId,
         actionId,
+        player.puzzle?.version ?? lobby.version,
       );
       if (!claimed) return true;
       if (lobby.status !== GameState.PUZZLE) {
@@ -1214,12 +1321,15 @@ export const gameService = {
         throw new GameError("BAD_REQUEST", "Puzzle arrangement is not solved.", 400);
       }
 
+      lobby.version = (lobby.version || 0) + 1;
+      puzzle.version = lobby.version;
+
       console.log("[ACTION_ACCEPTED]", {
         actionId: actionId ?? null,
         gameId,
         playerId,
         actionType: "COMPLETE",
-        version: null,
+        version: puzzle.version,
       });
       puzzle.completed = true;
       puzzle.completedAt = Date.now();

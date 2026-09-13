@@ -66,16 +66,17 @@ export async function joinLobby(
   return res.json();
 }
 
-export async function postAction(
+export async function postAction<T = Record<string, unknown>>(
   code: string,
   body: Record<string, unknown>,
-): Promise<void> {
+): Promise<T> {
   const res = await fetch(`/api/lobbies/${code}/actions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw await parseError(res);
+  return (await res.json().catch(() => ({}))) as T;
 }
 
 export function pieceUrl(

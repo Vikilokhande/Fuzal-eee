@@ -196,15 +196,14 @@ export async function GET(
             const metadata = await sharp(origBuf).metadata();
             const width = metadata.width || 800;
             const height = metadata.height || 800;
-            const tileWidth = Math.floor(width / cols);
-            const tileHeight = Math.floor(height / rows);
-
             const r = Math.floor(piece / cols);
             const c = piece % cols;
-            const left = c * tileWidth;
-            const top = r * tileHeight;
-            const extractWidth = c === cols - 1 ? width - left : tileWidth;
-            const extractHeight = r === rows - 1 ? height - top : tileHeight;
+            const left = Math.floor((c * width) / cols);
+            const right = Math.floor(((c + 1) * width) / cols);
+            const top = Math.floor((r * height) / rows);
+            const bottom = Math.floor(((r + 1) * height) / rows);
+            const extractWidth = right - left;
+            const extractHeight = bottom - top;
 
             const slicedBuf = await sharp(origBuf)
               .extract({ left, top, width: extractWidth, height: extractHeight })

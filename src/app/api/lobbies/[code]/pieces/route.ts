@@ -152,18 +152,27 @@ export async function GET(
           const meta = await sharp(origBuf).metadata();
           const width = meta.width || 800;
           const height = meta.height || 800;
-          const tileWidth = Math.floor(width / cols);
-          const tileHeight = Math.floor(height / rows);
-
           const sliceTasks: Promise<void>[] = [];
           for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
               const pieceId = r * cols + c;
               if (pieces[pieceId]) continue;
-              const left = c * tileWidth;
-              const top = r * tileHeight;
-              const extractWidth = c === cols - 1 ? width - left : tileWidth;
-              const extractHeight = r === rows - 1 ? height - top : tileHeight;
+              const left = Math.floor((c * width) / cols);
+              const right = Math.floor(((c + 1) * width) / cols);
+              const top = Math.floor((r * height) / rows);
+              const bottom = Math.floor(((r + 1) * height) / rows);
+              const extractWidth = right - left;
+              const extractHeight = bottom - top;
+              console.log("[PIECE_SLICE]", {
+                slug,
+                pieceId,
+                row: r,
+                col: c,
+                left,
+                top,
+                width: extractWidth,
+                height: extractHeight,
+              });
               sliceTasks.push(
                 sharp(origBuf)
                   .extract({ left, top, width: extractWidth, height: extractHeight })
@@ -176,6 +185,13 @@ export async function GET(
             }
           }
           await Promise.all(sliceTasks);
+          console.log("[PIECE_SLICE_VERIFY]", {
+            slug,
+            total,
+            rows,
+            cols,
+            slicesGenerated: sliceTasks.length,
+          });
         }
       } catch (sliceErr) {
         console.error("[DYNAMIC_SLICE_ERR]", sliceErr);

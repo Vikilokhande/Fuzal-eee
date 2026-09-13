@@ -39,14 +39,24 @@ export async function POST(
         await gameService.startGame(code, action.data.token);
         break;
       case "BEGIN_PUZZLE": {
-        await gameService.beginPuzzle(code);
-        const currentLobby = await lobbyService.getLobby(code);
+        await gameService.beginPuzzle(code, false);
+        const currentLobby = await gameService.ensureAuthoritativePhase(code);
+        const beginData = action.data as { playerId?: string };
+        const player = beginData.playerId
+          ? currentLobby.players.find((p) => p.id === beginData.playerId)
+          : null;
         return Response.json({
           ok: true,
           status: currentLobby.status,
           gameId: currentLobby.currentGameId ?? null,
           startedAt: currentLobby.puzzleStartedAt,
+          endsAt: currentLobby.puzzleEndsAt,
+          durationSeconds: currentLobby.puzzleDurationSeconds,
           pieceCount: currentLobby.pieceCount,
+          gridCols: currentLobby.gridCols,
+          gridRows: currentLobby.gridRows,
+          board: player?.puzzle?.board ?? null,
+          moves: player?.puzzle?.moves ?? 0,
         });
       }
       case "SWAP": {

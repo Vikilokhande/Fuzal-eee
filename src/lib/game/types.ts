@@ -47,6 +47,7 @@ export interface PuzzleInstance {
   completed: boolean;
   completedAt: number | null;
   eliminated?: boolean;
+  version?: number;
 }
 
 export interface Player {
@@ -85,6 +86,7 @@ export interface Lobby {
   gridCols: number;
   gridRows: number;
   pieceCount?: number;
+  version?: number;
   currentGameId?: string | null;
   memory: MemoryPhase | null;
   puzzleStartedAt: number | null;
@@ -100,10 +102,6 @@ export interface Lobby {
   usedImageIds: string[];
   createdAt: number;
 }
-
-/* ------------------------------------------------------------------ */
-/* Wire events (the "WebSocket" protocol, also carried over SSE)       */
-/* ------------------------------------------------------------------ */
 
 export const EventType = {
   SNAPSHOT: "SNAPSHOT",

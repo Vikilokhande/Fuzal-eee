@@ -775,10 +775,28 @@ export function useFuzalGame(opts: UseOpts) {
   const serverNow = useCallback(() => currentServerTime, [currentServerTime]);
 
   const memorySeconds = (() => {
-    if (!state?.memory) return 0;
+    if (state?.status !== GameState.MEMORY) return 0;
+    if (!state?.memory) return 30; // Never treat missing memory data as 0 seconds!
     const ms = state.memory.endsAt - currentServerTime;
     return Math.max(0, Math.ceil(ms / 1000));
   })();
+
+  const lastLoggedSecRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (state?.status === GameState.MEMORY) {
+      if (lastLoggedSecRef.current !== memorySeconds) {
+        lastLoggedSecRef.current = memorySeconds;
+        logClientDiagnostic("MEMORY_COUNTDOWN", {
+          gameId: state.currentGameId,
+          memorySeconds,
+          currentServerTime,
+          endsAt: state.memory?.endsAt ?? null,
+        });
+      }
+    } else {
+      lastLoggedSecRef.current = null;
+    }
+  }, [currentServerTime, memorySeconds, state?.currentGameId, state?.memory?.endsAt, state?.status]);
 
   const puzzleElapsedMs = (() => {
     if (!state) return 0;
@@ -802,33 +820,113 @@ export function useFuzalGame(opts: UseOpts) {
   })();
 
   // Atomic & idempotent client-side countdown expiration trigger:
-  // When memorySeconds reaches 0 and game is in MEMORY state, ask server to begin puzzle!
-  const beginPuzzleInFlightRef = useRef<string | null>(null);
+  // When memorySeconds reaches 0 and game is in MEMORY state, send BEGIN_PUZZLE with stable actionId
+  const beginPuzzleActionIdRef = useRef<string | null>(null);
+  const beginPuzzleSentRef = useRef<string | null>(null);
+
   useEffect(() => {
+    // Reset refs when gameId changes or status moves out of MEMORY
+    if (state?.status !== GameState.MEMORY) {
+      beginPuzzleSentRef.current = null;
+      beginPuzzleActionIdRef.current = null;
+      return;
+    }
+
     if (
       state?.status === GameState.MEMORY &&
+      state.memory &&
       memorySeconds <= 0 &&
       state.currentGameId &&
-      beginPuzzleInFlightRef.current !== state.currentGameId
+      beginPuzzleSentRef.current !== state.currentGameId
     ) {
-      beginPuzzleInFlightRef.current = state.currentGameId;
-      logClientDiagnostic("GAME_TRANSITION", {
-        action: "BEGIN_PUZZLE_CLIENT_TRIGGER",
+      beginPuzzleSentRef.current = state.currentGameId;
+      if (!beginPuzzleActionIdRef.current) {
+        beginPuzzleActionIdRef.current = makeActionId();
+      }
+      const actionId = beginPuzzleActionIdRef.current;
+
+      logClientDiagnostic("BEGIN_PUZZLE_REQUEST", {
         gameId: state.currentGameId,
+        actionId,
+        memorySeconds,
       });
-      void postAction(opts.code, { type: "BEGIN_PUZZLE" }).catch((err) => {
-        logClientDiagnostic(
-          "ACTION_REJECTED",
-          {
-            type: "BEGIN_PUZZLE",
+
+      void postAction<{
+        ok?: boolean;
+        status?: string;
+        gameId?: string;
+        startedAt?: number;
+        endsAt?: number;
+        durationSeconds?: number;
+        pieceCount?: number;
+        gridCols?: number;
+        gridRows?: number;
+        board?: number[];
+        moves?: number;
+      }>(opts.code, {
+        type: "BEGIN_PUZZLE",
+        actionId,
+        playerId: opts.playerId,
+      })
+        .then((resp) => {
+          logClientDiagnostic("BEGIN_PUZZLE_ACCEPTED", {
             gameId: state.currentGameId,
-            error: (err as Error).message,
-          },
-          "warn",
-        );
-      });
+            actionId,
+            serverStatus: resp?.status,
+          });
+
+          // Reconcile authoritative state directly from response without waiting for SSE!
+          if (resp?.status === GameState.PUZZLE) {
+            const prev = stateRef.current;
+            if (prev && prev.status !== GameState.PUZZLE && prev.status !== GameState.FINISHED) {
+              const totalPieces = resp.pieceCount ?? prev.pieceCount;
+              const hasValidBoard =
+                resp.board && Array.isArray(resp.board) && resp.board.length === totalPieces;
+              commitState({
+                ...prev,
+                status: GameState.PUZZLE,
+                memory: null,
+                puzzleStartedAt: resp.startedAt ?? prev.puzzleStartedAt ?? Date.now(),
+                puzzleEndsAt: resp.endsAt ?? prev.puzzleEndsAt ?? Date.now() + 180_000,
+                puzzleDurationSeconds: resp.durationSeconds ?? prev.puzzleDurationSeconds ?? 180,
+                puzzle: hasValidBoard
+                  ? {
+                      board: resp.board as number[],
+                      moves: resp.moves ?? 0,
+                      startedAt: resp.startedAt ?? Date.now(),
+                      correctSlots: computeCorrect(resp.board as number[]),
+                      completed: false,
+                      eliminated: false,
+                    }
+                  : prev.puzzle,
+              });
+            }
+          }
+        })
+        .catch((err) => {
+          logClientDiagnostic(
+            "ACTION_REJECTED",
+            {
+              type: "BEGIN_PUZZLE",
+              gameId: state.currentGameId,
+              actionId,
+              error: (err as Error).message,
+            },
+            "warn",
+          );
+          // Allow retry with same actionId
+          beginPuzzleSentRef.current = null;
+        });
     }
-  }, [memorySeconds, opts.code, state?.currentGameId, state?.status]);
+  }, [
+    commitState,
+    memorySeconds,
+    opts.code,
+    opts.playerId,
+    state?.currentGameId,
+    state?.memory,
+    state?.status,
+  ]);
 
   const isEliminated = Boolean(
     (state?.status === GameState.PUZZLE && puzzleRemainingMs <= 0 && !state.puzzle?.completed) ||
@@ -1041,6 +1139,12 @@ export function useFuzalGame(opts: UseOpts) {
         ready,
       });
       if (ready) {
+        logClientDiagnostic("PUZZLE_PRELOAD_READY", {
+          gameId,
+          pieceCount: total,
+          loaded: loaded.size,
+          failed,
+        });
         logClientDiagnostic("PUZZLE_READY", {
           gameId,
           pieceCount: total,
@@ -1062,6 +1166,11 @@ export function useFuzalGame(opts: UseOpts) {
     }
 
     async function loadBatch(): Promise<boolean> {
+      logClientDiagnostic("PUZZLE_PRELOAD_START", {
+        gameId,
+        pieceCount: total,
+        phase: state?.status,
+      });
       const batchUrl = `/api/lobbies/${opts.code}/pieces?p=${encodeURIComponent(
         opts.playerId!,
       )}&t=${encodeURIComponent(opts.playerToken!)}`;

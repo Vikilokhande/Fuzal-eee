@@ -147,6 +147,7 @@ export async function GET(
       // 4. Bounded connection: rotate cleanly after 25s (prevents Vercel 300s timeout)
       const rotateTimer = setTimeout(() => {
         if (closed) return;
+        console.log("[SSE_ROTATION]", { code: upperCode, kind, at: Date.now() });
         sendFrame(JSON.stringify({ type: "STREAM_END", at: Date.now() }), undefined, "stream_end");
         setTimeout(() => cleanup(), 250);
       }, 25000);

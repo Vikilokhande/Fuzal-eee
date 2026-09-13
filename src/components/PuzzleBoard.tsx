@@ -131,11 +131,12 @@ export function PuzzleBoard({
   const ready = boardValid && loadedRequired >= total;
   const isInteractive = interactive && ready && !completed;
   const effectiveSelected = completed ? null : selected;
-  const aspectRatio = `${cols} / ${rows}`;
+  const boardAspectRatio = "1 / 1";
+  const cellAspectRatio = `${rows} / ${cols}`;
   const maxBoardWidth =
     viewportHeight === null
       ? 520
-      : Math.max(230, Math.min(520, Math.floor((viewportHeight - 230) * (cols / rows))));
+      : Math.max(230, Math.min(520, Math.floor(viewportHeight - 230)));
 
   /** Calculates grid slot from screen client coordinates */
   const getSlotAtCoords = (clientX: number, clientY: number): number | null => {
@@ -215,11 +216,12 @@ export function PuzzleBoard({
         const src = pieceSrcs[pieceId];
         if (src) {
           dragAvatarImgRef.current.src = src;
-          const size = tracker.cellRect?.width ?? 80;
-          dragAvatarRef.current.style.width = `${size}px`;
-          dragAvatarRef.current.style.height = `${size}px`;
-          dragAvatarRef.current.style.transform = `translate3d(${tracker.currentX - size / 2}px, ${
-            tracker.currentY - size / 2
+          const cellWidth = tracker.cellRect?.width ?? 80;
+          const cellHeight = tracker.cellRect?.height ?? cellWidth;
+          dragAvatarRef.current.style.width = `${cellWidth}px`;
+          dragAvatarRef.current.style.height = `${cellHeight}px`;
+          dragAvatarRef.current.style.transform = `translate3d(${tracker.currentX - cellWidth / 2}px, ${
+            tracker.currentY - cellHeight / 2
           }px, 0) scale(1.06)`;
           dragAvatarRef.current.style.display = "block";
         }
@@ -233,9 +235,10 @@ export function PuzzleBoard({
     if (tracker.isDragging) {
       // 60fps direct DOM translation: zero React re-renders on pointer move!
       if (dragAvatarRef.current) {
-        const size = tracker.cellRect?.width ?? 80;
-        dragAvatarRef.current.style.transform = `translate3d(${e.clientX - size / 2}px, ${
-          e.clientY - size / 2
+        const cellWidth = tracker.cellRect?.width ?? 80;
+        const cellHeight = tracker.cellRect?.height ?? cellWidth;
+        dragAvatarRef.current.style.transform = `translate3d(${e.clientX - cellWidth / 2}px, ${
+          e.clientY - cellHeight / 2
         }px, 0) scale(1.06)`;
       }
 
@@ -334,7 +337,7 @@ export function PuzzleBoard({
       <div
         className="glass flex w-full flex-col items-center justify-center gap-4 rounded-2xl p-8 text-center shadow-2xl ring-1 ring-rose-500/30"
         style={{
-          aspectRatio,
+          aspectRatio: boardAspectRatio,
           maxWidth: `min(94vw, ${maxBoardWidth}px)`,
         }}
       >
@@ -359,7 +362,7 @@ export function PuzzleBoard({
     <div
       className="relative mx-auto w-full select-none"
       style={{
-        aspectRatio,
+        aspectRatio: boardAspectRatio,
         maxWidth: `min(94vw, ${maxBoardWidth}px)`,
       }}
     >
@@ -379,7 +382,8 @@ export function PuzzleBoard({
         className="no-select grid w-full gap-[2px] sm:gap-[3px] rounded-2xl bg-black/40 p-[2px] sm:p-[3px] shadow-[0_18px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10"
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          aspectRatio,
+          gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+          aspectRatio: boardAspectRatio,
           touchAction: "none",
         }}
         role="grid"
@@ -408,8 +412,8 @@ export function PuzzleBoard({
                 e.preventDefault();
                 e.stopPropagation();
               }}
-              style={{ touchAction: "none" }}
-              className={`relative aspect-square overflow-hidden rounded-[7px] bg-slate-800/80 outline-none transition-all duration-100 ${
+              style={{ touchAction: "none", aspectRatio: cellAspectRatio }}
+              className={`relative overflow-hidden rounded-[7px] bg-slate-800/80 outline-none transition-all duration-100 ${
                 isSelected
                   ? "ring-2 ring-cyan-400 shadow-[0_0_14px_rgba(34,211,238,0.75)] scale-[0.96] z-10"
                   : ""
@@ -427,7 +431,7 @@ export function PuzzleBoard({
                   loading="eager"
                   decoding="async"
                   draggable={false}
-                  className="pointer-events-none select-none no-drag h-full w-full object-cover"
+                  className="pointer-events-none select-none no-drag h-full w-full object-fill block"
                 />
               ) : (
                 <span className="shimmer absolute inset-0" />

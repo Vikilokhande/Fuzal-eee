@@ -26,6 +26,8 @@ import { GameError } from "./errors";
 export interface LobbyRepository {
   put(lobby: Lobby): Promise<Lobby>;
   getByCode(code: string): Promise<Lobby | null>;
+  getByCodeFast?(code: string): Lobby | null;
+  savePlayerSwap?(lobby: Lobby, playerId: string, actionId?: string): Promise<void>;
   deleteByCode(code: string): Promise<void>;
   size(): Promise<number>;
 }
@@ -554,6 +556,66 @@ export class SupabaseLobbyRepository implements LobbyRepository {
     }
   }
 
+  getByCodeFast(code: string): Lobby | null {
+    return this.processLobbies.get(code.toUpperCase()) ?? null;
+  }
+
+  async savePlayerSwap(lobby: Lobby, playerId: string, actionId?: string): Promise<void> {
+    const code = lobby.code.toUpperCase();
+    this.processLobbies.set(code, lobby);
+
+    const player = lobby.players.find((p) => p.id === playerId);
+    if (!player || !player.puzzle || !lobby.currentGameId || !isSupabaseConfigured()) {
+      return;
+    }
+
+    const { board, moves, version } = player.puzzle;
+    const correctCount = correctSlots(board).filter(Boolean).length;
+
+    try {
+      const updatePromise = withDbRetry(`save_player_swap(${playerId})`, () =>
+        supabaseAdmin
+          .from("game_players")
+          .update({
+            board,
+            moves,
+            correct_slots: correctCount,
+          })
+          .eq("game_id", lobby.currentGameId)
+          .eq("player_id", playerId),
+        1,
+      );
+
+      const actionPromise = actionId
+        ? withDbRetry(`record_client_action(${actionId})`, () =>
+            supabaseAdmin.from("client_actions").insert({
+              lobby_code: code,
+              game_id: lobby.currentGameId ?? null,
+              player_id: playerId,
+              action_id: actionId,
+              action_type: "SWAP",
+              version: version ?? 1,
+            }),
+            1,
+          )
+        : Promise.resolve({ data: null, error: null });
+
+      const [upRes, actRes] = await Promise.all([updatePromise, actionPromise]);
+      if (upRes.error && !isTransientDbError(upRes.error)) {
+        console.warn("[REPO_WARN] Failed to update player swap in db:", upRes.error.message);
+      }
+      if (
+        actRes.error &&
+        !isTransientDbError(actRes.error) &&
+        !String(actRes.error.message || "").toLowerCase().includes("duplicate")
+      ) {
+        console.warn("[REPO_WARN] Failed to record client_action in db:", actRes.error.message);
+      }
+    } catch (err: any) {
+      console.warn("[REPO_SWAP_PERSIST_WARN]", err?.message);
+    }
+  }
+
   async deleteByCode(code: string): Promise<void> {
     const normCode = code.toUpperCase();
     this.processLobbies.delete(normCode);
@@ -589,6 +651,14 @@ export class InMemoryLobbyRepository implements LobbyRepository {
 
   async getByCode(code: string): Promise<Lobby | null> {
     return this.lobbies.get(code) ?? null;
+  }
+
+  getByCodeFast(code: string): Lobby | null {
+    return this.lobbies.get(code) ?? null;
+  }
+
+  async savePlayerSwap(lobby: Lobby): Promise<void> {
+    this.lobbies.set(lobby.code, lobby);
   }
 
   async deleteByCode(code: string): Promise<void> {
