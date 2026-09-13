@@ -140,16 +140,49 @@ export interface GameEvent<T = unknown> {
 /* REST validation schemas                                            */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* REST validation schemas                                            */
+/* ------------------------------------------------------------------ */
+
 export const LOBBY_CODE_RE = /^[A-Z0-9]{4}$/;
 export const PLAYER_ID_RE =
   /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|p_[A-Za-z0-9]{10,})$/i;
 export const NAME_RE = /^[\p{L}\p{N} _.\-']{1,16}$/u;
 
-export const createLobbySchema = z.object({
-  gridCols: z.number().int().min(3).max(6).optional(),
-  gridRows: z.number().int().min(3).max(6).optional(),
-  memorySeconds: z.number().int().min(5).max(120).optional(),
-});
+export const SUPPORTED_GRID_SIZES = [2, 3, 4, 5, 6, 7, 8] as const;
+export type SupportedGridSize = (typeof SUPPORTED_GRID_SIZES)[number];
+
+export function isSupportedGridSize(n: unknown): n is SupportedGridSize {
+  return typeof n === "number" && Number.isInteger(n) && n >= 2 && n <= 8;
+}
+
+export const createLobbySchema = z
+  .object({
+    gridSize: z.number().int().min(2).max(8).optional(),
+    gridCols: z.number().int().min(2).max(8).optional(),
+    gridRows: z.number().int().min(2).max(8).optional(),
+    memorySeconds: z.number().int().min(5).max(120).optional(),
+  })
+  .refine(
+    (data) => {
+      if (data.gridSize !== undefined && (data.gridSize < 2 || data.gridSize > 8)) {
+        return false;
+      }
+      if (data.gridCols !== undefined && data.gridRows !== undefined) {
+        return data.gridCols === data.gridRows;
+      }
+      if (data.gridSize !== undefined && data.gridCols !== undefined) {
+        return data.gridSize === data.gridCols;
+      }
+      if (data.gridSize !== undefined && data.gridRows !== undefined) {
+        return data.gridSize === data.gridRows;
+      }
+      return true;
+    },
+    {
+      message: "Only square grids (2x2 through 8x8) are supported for new games.",
+    },
+  );
 
 export const joinSchema = z.object({
   name: z
@@ -174,8 +207,8 @@ export const startGameAction = actionBase.extend({
 export const swapAction = actionBase.extend({
   type: z.literal("SWAP"),
   playerId: z.string().min(3),
-  from: z.number().int().min(0).max(35),
-  to: z.number().int().min(0).max(35),
+  from: z.number().int().min(0).max(63),
+  to: z.number().int().min(0).max(63),
   ...clientActionFields,
 });
 export const completeAction = actionBase.extend({

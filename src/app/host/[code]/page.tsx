@@ -44,7 +44,7 @@ export default function HostPage() {
   const { state, connState, toast, memorySeconds, puzzleElapsedMs, puzzleRemainingMs, actions } = game;
 
   async function newLobby() {
-    const lobby = await createLobby();
+    const lobby = await createLobby({ gridSize: state?.gridCols ?? 3 });
     sessionStore.set(`host:${lobby.code}`, { token: lobby.hostToken });
     router.push(`/host/${lobby.code}`);
   }
@@ -147,9 +147,14 @@ export default function HostPage() {
         <div className="relative mx-auto flex min-h-[calc(100vh-3rem)] w-full max-w-6xl flex-col items-center gap-6 sm:gap-8">
           <div className="animate-slide-up mt-1 sm:mt-2 flex flex-col items-center gap-2 sm:gap-3 text-center">
             <Wordmark size={44} />
-            <p className="text-sm sm:text-lg font-semibold uppercase tracking-[0.3em] sm:tracking-[0.4em] text-cyan-200/90">
-              Scan to Join the Game
-            </p>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <p className="text-sm sm:text-lg font-semibold uppercase tracking-[0.3em] sm:tracking-[0.4em] text-cyan-200/90">
+                Scan to Join the Game
+              </p>
+              <span className="rounded-full bg-cyan-500/20 px-3 py-0.5 text-xs font-bold text-cyan-300 ring-1 ring-cyan-400/40">
+                {state.gridCols}×{state.gridRows} • {totalPieces} pieces
+              </span>
+            </div>
           </div>
 
           <div className="flex w-full flex-col items-center gap-6 md:grid md:grid-cols-[1.05fr_1fr] md:gap-10">

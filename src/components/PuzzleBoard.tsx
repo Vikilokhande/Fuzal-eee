@@ -132,7 +132,7 @@ export function PuzzleBoard({
   const isInteractive = interactive && ready && !completed;
   const effectiveSelected = completed ? null : selected;
   const boardAspectRatio = "1 / 1";
-  const cellAspectRatio = `${rows} / ${cols}`;
+  const cellAspectRatio = "1 / 1";
   const maxBoardWidth =
     viewportHeight === null
       ? 520
@@ -465,7 +465,7 @@ export function PuzzleBoard({
           src=""
           alt="Dragging piece"
           draggable={false}
-          className="pointer-events-none h-full w-full select-none no-drag object-cover"
+          className="pointer-events-none h-full w-full select-none no-drag object-fill block"
         />
       </div>
     </div>

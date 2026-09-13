@@ -23,12 +23,8 @@ describe("Game Phase Synchronization, 12-Piece Geometry & Action Versioning", ()
     createdLobbyCodes = [];
   });
 
-  async function createTestLobby(cols = 3, rows = 4) {
-    const lobby = await lobbyService.createLobby();
-    lobby.gridCols = cols;
-    lobby.gridRows = rows;
-    lobby.pieceCount = cols * rows;
-    await lobbyRepo.put(lobby);
+  async function createTestLobby(n = 4) {
+    const lobby = await lobbyService.createLobby({ gridSize: n });
     createdLobbyCodes.push(lobby.code);
     const { player } = await lobbyService.join(lobby.code, "Alice");
     return { lobby: (await lobbyRepo.getByCode(lobby.code))!, player };
@@ -72,7 +68,7 @@ describe("Game Phase Synchronization, 12-Piece Geometry & Action Versioning", ()
       const ensured = await gameService.ensureAuthoritativePhase(lobby.code);
       expect(ensured.status).toBe(GameState.PUZZLE);
       expect(ensured.puzzleStartedAt).toBeGreaterThan(0);
-      expect(ensured.pieceCount).toBe(12);
+      expect(ensured.pieceCount).toBe(16);
     });
 
     it("BEGIN_PUZZLE is idempotent and does not error if called repeatedly", async () => {
@@ -276,8 +272,8 @@ describe("Game Phase Synchronization, 12-Piece Geometry & Action Versioning", ()
       expect(reconstructedBuffer.equals(originalRawBuffer)).toBe(true);
     }
 
-    it("generates exact 12-piece (3 cols x 4 rows) slices and reconstructs source pixel-for-pixel", async () => {
-      await testSlicingAndReconstruction(900, 900, 3, 4);
+    it("generates exact 4-piece (2x2) slices and reconstructs source pixel-for-pixel", async () => {
+      await testSlicingAndReconstruction(900, 900, 2, 2);
     });
 
     it("generates exact 9-piece (3x3) slices and reconstructs source pixel-for-pixel", async () => {
@@ -288,38 +284,41 @@ describe("Game Phase Synchronization, 12-Piece Geometry & Action Versioning", ()
       await testSlicingAndReconstruction(900, 900, 4, 4);
     });
 
-    it("preserves correct aspect ratio: 4:3 tile ratio for 12 pieces on 1:1 board", () => {
+    it("generates exact 25-piece (5x5) slices and reconstructs source pixel-for-pixel", async () => {
+      await testSlicingAndReconstruction(900, 900, 5, 5);
+    });
+
+    it("preserves correct aspect ratio: 1:1 square tile ratio for square grids on 1:1 board", () => {
       const width = 900;
       const height = 900;
-      const cols = 3;
-      const rows = 4;
+      const n = 4;
 
-      const tileWidth = width / cols; // 300
-      const tileHeight = height / rows; // 225
-      const tileAspectRatio = tileWidth / tileHeight; // 4/3
+      const tileWidth = width / n; // 225
+      const tileHeight = height / n; // 225
+      const tileAspectRatio = tileWidth / tileHeight; // 1.0
 
-      expect(tileWidth).toBe(300);
+      expect(tileWidth).toBe(225);
       expect(tileHeight).toBe(225);
-      expect(tileAspectRatio).toBeCloseTo(4 / 3, 5);
+      expect(tileAspectRatio).toBe(1.0);
 
       // Reconstructed board aspect ratio
-      const boardWidth = cols * tileWidth;
-      const boardHeight = rows * tileHeight;
+      const boardWidth = n * tileWidth;
+      const boardHeight = n * tileHeight;
       expect(boardWidth / boardHeight).toBe(1.0);
     });
 
-    it("validates solved detection canonically for 12 pieces", () => {
-      const solved12 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-      expect(isSolved(solved12, 12)).toBe(true);
+    it("validates solved detection canonically for square grids", () => {
+      const solved16 = Array.from({ length: 16 }, (_, i) => i);
+      expect(isSolved(solved16, 16)).toBe(true);
 
-      const unsolved = [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-      expect(isSolved(unsolved, 12)).toBe(false);
+      const unsolved = [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+      expect(isSolved(unsolved, 16)).toBe(false);
 
       const indicators = correctSlots(unsolved);
       expect(indicators[0]).toBe(false);
       expect(indicators[1]).toBe(false);
       expect(indicators[2]).toBe(true);
-      expect(indicators[11]).toBe(true);
+      expect(indicators[15]).toBe(true);
     });
   });
 });

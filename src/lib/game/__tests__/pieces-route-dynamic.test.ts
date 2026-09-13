@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameState } from "../types";
 
-function makeLocalLobby(pieceCount = 12) {
+function makeLocalLobby(pieceCount = 16) {
   return {
     status: GameState.PUZZLE,
-    gridCols: 3,
+    gridCols: 4,
     gridRows: 4,
     pieceCount,
     players: [
@@ -15,8 +15,8 @@ function makeLocalLobby(pieceCount = 12) {
     ],
     memory: {
       image: {
-        slug: "twelve-test",
-        name: "Twelve Test",
+        slug: "sixteen-test",
+        name: "Sixteen Test",
       },
     },
   };
@@ -31,16 +31,20 @@ function mockRouteDeps() {
     },
   }));
   vi.doMock("@/lib/game/puzzlePiecesData", () => ({
-    getAllPiecesForSlug: vi.fn(() =>
-      Object.fromEntries(
-        Array.from({ length: 16 }, (_, pieceId) => [
+    getAllPiecesForSlug: vi.fn(() => null),
+    getPieceBuffer: vi.fn(() => null),
+  }));
+  vi.doMock("@/lib/game/slicer", () => ({
+    sliceAllPieces: vi.fn(async (_slug: string, n: number) => {
+      return Object.fromEntries(
+        Array.from({ length: n * n }, (_, pieceId) => [
           pieceId,
           `data:image/webp;base64,piece-${pieceId}`,
         ]),
-      ),
-    ),
-    getPieceBuffer: vi.fn((_slug: string, pieceId: number) =>
-      pieceId < 12 ? Buffer.from(`piece-${pieceId}`) : null,
+      );
+    }),
+    slicePiece: vi.fn(async (_slug: string, _n: number, pieceId: number) =>
+      Buffer.from(`piece-${pieceId}`),
     ),
   }));
   vi.doMock("@/lib/supabase/admin", () => ({
@@ -58,10 +62,11 @@ describe("dynamic puzzle piece routes", () => {
     vi.restoreAllMocks();
     vi.doUnmock("@/lib/game/repo");
     vi.doUnmock("@/lib/game/puzzlePiecesData");
+    vi.doUnmock("@/lib/game/slicer");
     vi.doUnmock("@/lib/supabase/admin");
   });
 
-  it("returns exactly the active 12-piece puzzle bundle", async () => {
+  it("returns exactly the active 16-piece (4x4) puzzle bundle", async () => {
     mockRouteDeps();
     const { GET } = await import("@/app/api/lobbies/[code]/pieces/route");
 
@@ -74,11 +79,11 @@ describe("dynamic puzzle piece routes", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.pieceCount).toBe(12);
-    expect(Object.keys(body.pieces)).toHaveLength(12);
+    expect(body.pieceCount).toBe(16);
+    expect(Object.keys(body.pieces)).toHaveLength(16);
     expect(body.pieces[0]).toBe("data:image/webp;base64,piece-0");
-    expect(body.pieces[11]).toBe("data:image/webp;base64,piece-11");
-    expect(body.pieces[12]).toBeUndefined();
+    expect(body.pieces[15]).toBe("data:image/webp;base64,piece-15");
+    expect(body.pieces[16]).toBeUndefined();
   });
 
   it("rejects a single piece outside the active puzzle size", async () => {
@@ -87,9 +92,9 @@ describe("dynamic puzzle piece routes", () => {
 
     const res = await GET(
       new Request(
-        "http://localhost:3000/api/lobbies/ABCD/piece/12?p=11111111-1111-4111-8111-111111111111&t=xxxxxxxxxxxxxxxxxxxxxxxx",
+        "http://localhost:3000/api/lobbies/ABCD/piece/16?p=11111111-1111-4111-8111-111111111111&t=xxxxxxxxxxxxxxxxxxxxxxxx",
       ),
-      { params: Promise.resolve({ code: "ABCD", pieceId: "12" }) },
+      { params: Promise.resolve({ code: "ABCD", pieceId: "16" }) },
     );
     const body = await res.json();
 

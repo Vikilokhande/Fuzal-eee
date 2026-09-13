@@ -3,7 +3,7 @@ import { GameState } from "@/lib/game/types";
 import { safeEqualToken } from "@/lib/game/auth";
 import { errorResponse } from "@/lib/game/http";
 import { getAllPiecesForSlug } from "@/lib/game/puzzlePiecesData";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { sliceAllPieces } from "@/lib/game/slicer";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -33,7 +33,7 @@ function selectRequiredPieces(
 /**
  * Fast batch pieces endpoint:
  * Returns all puzzle pieces in a single compressed JSON response (<20KB).
- * Dynamically slices from original.webp if pre-sliced assets do not match grid dimensions.
+ * Uses canonical master image slicing for all N x N grids (2x2 through 8x8).
  */
 export async function GET(
   req: Request,
@@ -120,86 +120,28 @@ export async function GET(
       );
     }
 
-    // 2. Fetch pre-sliced pieces from embedded bundle (0ms)
-    let pieces = selectRequiredPieces(getAllPiecesForSlug(slug), total);
-
-    // 3. Fallback: If not in embedded bundle, fetch pre-sliced from Supabase Storage
-    if (!pieces) {
-      pieces = {};
-      const fetches = Array.from({ length: total }, async (_, pieceId) => {
-        const pieceNumStr = String(pieceId).padStart(2, "0");
-        const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
-        const { data: fileData } = await supabaseAdmin.storage
-          .from("puzzle-images")
-          .download(piecePath);
-        if (fileData) {
-          const buf = Buffer.from(await fileData.arrayBuffer());
-          pieces![pieceId] = `data:image/webp;base64,${buf.toString("base64")}`;
-        }
-      });
-      await Promise.all(fetches);
+    // 2. For 3x3 only: Check embedded bundle (0ms)
+    let pieces: Record<number, string> | null = null;
+    if (cols === 3 && rows === 3 && total === 9) {
+      pieces = selectRequiredPieces(getAllPiecesForSlug(slug), total);
     }
 
-    // 4. Dynamic Slicing Fallback: If pre-sliced tiles do not cover all required pieces (e.g. 12 pieces)
-    if (Object.keys(pieces).length < total) {
+    // 3. For all other grids (2x2, 4x4, 5x5, 6x6, 7x7, 8x8) or fallback:
+    // Slices directly from the canonical master image using the exact mathematical formula.
+    if (!pieces || Object.keys(pieces).length < total) {
       try {
-        const { data: origData } = await supabaseAdmin.storage
-          .from("puzzle-images")
-          .download(`${slug}/original.webp`);
-        if (origData) {
-          const origBuf = Buffer.from(await origData.arrayBuffer());
-          const sharp = (await import("sharp")).default;
-          const meta = await sharp(origBuf).metadata();
-          const width = meta.width || 800;
-          const height = meta.height || 800;
-          const sliceTasks: Promise<void>[] = [];
-          for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-              const pieceId = r * cols + c;
-              if (pieces[pieceId]) continue;
-              const left = Math.floor((c * width) / cols);
-              const right = Math.floor(((c + 1) * width) / cols);
-              const top = Math.floor((r * height) / rows);
-              const bottom = Math.floor(((r + 1) * height) / rows);
-              const extractWidth = right - left;
-              const extractHeight = bottom - top;
-              console.log("[PIECE_SLICE]", {
-                slug,
-                pieceId,
-                row: r,
-                col: c,
-                left,
-                top,
-                width: extractWidth,
-                height: extractHeight,
-              });
-              sliceTasks.push(
-                sharp(origBuf)
-                  .extract({ left, top, width: extractWidth, height: extractHeight })
-                  .webp({ quality: 85 })
-                  .toBuffer()
-                  .then((b) => {
-                    pieces![pieceId] = `data:image/webp;base64,${b.toString("base64")}`;
-                  }),
-              );
-            }
-          }
-          await Promise.all(sliceTasks);
-          console.log("[PIECE_SLICE_VERIFY]", {
-            slug,
-            total,
-            rows,
-            cols,
-            slicesGenerated: sliceTasks.length,
-          });
-        }
+        pieces = await sliceAllPieces(slug, cols);
       } catch (sliceErr) {
-        console.error("[DYNAMIC_SLICE_ERR]", sliceErr);
+        console.error(`[BATCH_SLICE_ERR] slug=${slug}, grid=${cols}x${rows}:`, sliceErr);
+        return Response.json(
+          { error: "INTERNAL_ERROR", message: "Failed to slice puzzle pieces." },
+          { status: 500 },
+        );
       }
     }
 
     return Response.json(
-      { ok: true, slug, pieceCount: total, pieces },
+      { ok: true, slug, pieceCount: total, gridCols: cols, gridRows: rows, pieces },
       {
         status: 200,
         headers: {

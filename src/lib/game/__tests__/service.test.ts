@@ -160,9 +160,9 @@ describe("state machine & timer", () => {
     expect(unique.size).toBeGreaterThan(1);
   });
 
-  it("initializes 12-piece puzzles when a 3x4 lobby is selected", async () => {
-    const lobby = await lobbyService.createLobby({ gridCols: 3, gridRows: 4 });
-    const { player } = await lobbyService.join(lobby.code, "Twelve");
+  it("initializes 16-piece puzzles when a 4x4 square lobby is selected", async () => {
+    const lobby = await lobbyService.createLobby({ gridSize: 4 });
+    const { player } = await lobbyService.join(lobby.code, "Sixteen");
     await gameService.startGame(lobby.code, lobby.hostToken);
     await gameService.beginPuzzle(lobby.code);
 
@@ -170,15 +170,15 @@ describe("state machine & timer", () => {
     const activePlayer = active!.players.find((p) => p.id === player.id)!;
     const snapshot = lobbyService.buildSnapshot(active!, "player", activePlayer);
 
-    expect(active!.gridCols).toBe(3);
+    expect(active!.gridCols).toBe(4);
     expect(active!.gridRows).toBe(4);
-    expect(active!.pieceCount).toBe(12);
-    expect(activePlayer.puzzle?.board).toHaveLength(12);
+    expect(active!.pieceCount).toBe(16);
+    expect(activePlayer.puzzle?.board).toHaveLength(16);
     expect(activePlayer.puzzle?.board.slice().sort((a, b) => a - b)).toEqual(
-      Array.from({ length: 12 }, (_, i) => i),
+      Array.from({ length: 16 }, (_, i) => i),
     );
-    expect(snapshot.payload.pieceCount).toBe(12);
-    expect(snapshot.payload.puzzle?.board).toHaveLength(12);
+    expect(snapshot.payload.pieceCount).toBe(16);
+    expect(snapshot.payload.puzzle?.board).toHaveLength(16);
 
     await clearTimers(lobby.code);
   });

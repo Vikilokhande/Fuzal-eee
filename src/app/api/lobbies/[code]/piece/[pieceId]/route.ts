@@ -3,7 +3,7 @@ import { GameState } from "@/lib/game/types";
 import { safeEqualToken } from "@/lib/game/auth";
 import { errorResponse } from "@/lib/game/http";
 import { getPieceBuffer } from "@/lib/game/puzzlePiecesData";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { slicePiece } from "@/lib/game/slicer";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,13 +16,6 @@ function pieceCountFromLobby(lobby: any): number {
   return (Number.isInteger(cols) && cols > 0 ? cols : 3) *
     (Number.isInteger(rows) && rows > 0 ? rows : 3);
 }
-
-/**
- * In-memory global piece buffer cache:
- * Key: `${slug}:${cols}x${rows}:${pieceId}`
- * Value: ArrayBuffer of the WebP tile
- */
-const pieceCache = new Map<string, ArrayBuffer>();
 
 /**
  * Short-lived in-memory auth cache:
@@ -50,7 +43,8 @@ export async function GET(
     const token = url.searchParams.get("t") ?? "";
 
     const piece = Number(pieceParam);
-    if (!Number.isInteger(piece) || piece < 0 || piece >= 36) {
+    // Allow pieces up to 63 (supporting 8x8 = 64 pieces)
+    if (!Number.isInteger(piece) || piece < 0 || piece >= 64) {
       return Response.json(
         { error: "BAD_REQUEST", message: "Invalid piece index." },
         { status: 400 },
@@ -140,106 +134,37 @@ export async function GET(
       );
     }
 
-    // 2. Check pre-sliced 200x200 WebP bundle first (0ms)
-    const embeddedBuf = getPieceBuffer(slug, piece);
-    if (embeddedBuf) {
-      return new Response(embeddedBuf as unknown as BodyInit, {
+    // 2. Fast path for 3x3 only: check embedded 300x300 bundle (0ms)
+    if (cols === 3 && rows === 3) {
+      const embeddedBuf = getPieceBuffer(slug, piece);
+      if (embeddedBuf) {
+        return new Response(embeddedBuf as unknown as BodyInit, {
+          status: 200,
+          headers: {
+            "Content-Type": "image/webp",
+            "Cache-Control": "public, max-age=86400, immutable",
+          },
+        });
+      }
+    }
+
+    // 3. Canonical Slicing Engine: Slices directly from source image using exact mathematical formulas
+    try {
+      const pieceBuf = await slicePiece(slug, cols, piece);
+      return new Response(pieceBuf as unknown as BodyInit, {
         status: 200,
         headers: {
           "Content-Type": "image/webp",
           "Cache-Control": "public, max-age=86400, immutable",
         },
       });
+    } catch (sliceErr) {
+      console.error(`[PIECE_SLICE_ERR] lobby=${code}, piece=${piece}, total=${total}:`, sliceErr);
+      return Response.json(
+        { error: "NOT_FOUND", message: "Failed to slice puzzle piece from source." },
+        { status: 404 },
+      );
     }
-
-    // 3. Check in-memory piece cache
-    const pieceCacheKey = `${slug}:${cols}x${rows}:${piece}`;
-    let arrayBuffer = pieceCache.get(pieceCacheKey);
-
-    if (!arrayBuffer) {
-      const pieceNumStr = String(piece).padStart(2, "0");
-      const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
-
-      // Fast path: Fetch directly from Supabase public CDN endpoint if grid matches pre-sliced files
-      let fetchedData: ArrayBuffer | null = null;
-      if (cols === 4 && rows === 4) {
-        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/+$/, "");
-        const cdnUrl = `${supabaseUrl}/storage/v1/object/public/puzzle-images/${piecePath}`;
-        try {
-          const cdnRes = await fetch(cdnUrl);
-          if (cdnRes.ok) {
-            fetchedData = await cdnRes.arrayBuffer();
-          }
-        } catch {
-          // Fallback to SDK download
-        }
-      }
-
-      if (!fetchedData && cols === 4 && rows === 4) {
-        const { data: fileData } = await supabaseAdmin.storage
-          .from("puzzle-images")
-          .download(piecePath);
-        if (fileData) {
-          fetchedData = await fileData.arrayBuffer();
-        }
-      }
-
-      // 4. Dynamic Slicing Fallback: When piece not pre-sliced for this grid (e.g. 12-piece: 3x4 / 4x3)
-      if (!fetchedData) {
-        try {
-          const { data: origData, error: origErr } = await supabaseAdmin.storage
-            .from("puzzle-images")
-            .download(`${slug}/original.webp`);
-          if (origData && !origErr) {
-            const origBuf = Buffer.from(await origData.arrayBuffer());
-            const sharp = (await import("sharp")).default;
-            const metadata = await sharp(origBuf).metadata();
-            const width = metadata.width || 800;
-            const height = metadata.height || 800;
-            const r = Math.floor(piece / cols);
-            const c = piece % cols;
-            const left = Math.floor((c * width) / cols);
-            const right = Math.floor(((c + 1) * width) / cols);
-            const top = Math.floor((r * height) / rows);
-            const bottom = Math.floor(((r + 1) * height) / rows);
-            const extractWidth = right - left;
-            const extractHeight = bottom - top;
-
-            const slicedBuf = await sharp(origBuf)
-              .extract({ left, top, width: extractWidth, height: extractHeight })
-              .webp({ quality: 85 })
-              .toBuffer();
-            fetchedData = slicedBuf.buffer.slice(
-              slicedBuf.byteOffset,
-              slicedBuf.byteOffset + slicedBuf.byteLength,
-            ) as ArrayBuffer;
-          }
-        } catch (sliceErr) {
-          console.error(`[DYNAMIC_PIECE_SLICE_ERR]`, sliceErr);
-        }
-      }
-
-      if (!fetchedData) {
-        console.error(
-          `[PIECE_ERROR] Failed to fetch piece: lobby=${code}, piece=${piece}, total=${total}`,
-        );
-        return Response.json(
-          { error: "NOT_FOUND", message: "Piece asset not found." },
-          { status: 404 },
-        );
-      }
-
-      arrayBuffer = fetchedData;
-      pieceCache.set(pieceCacheKey, arrayBuffer);
-    }
-
-    return new Response(arrayBuffer, {
-      status: 200,
-      headers: {
-        "Content-Type": "image/webp",
-        "Cache-Control": "public, max-age=86400, immutable",
-      },
-    });
   } catch (e) {
     return errorResponse(e);
   }

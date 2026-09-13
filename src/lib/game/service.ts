@@ -28,6 +28,7 @@ import {
   GameState,
   VALID_TRANSITIONS,
   PlayerConnection,
+  isSupportedGridSize,
   type GameEvent,
   type ImageMeta,
   type Lobby,
@@ -306,13 +307,38 @@ async function createGameRoundRecord(
 
 export const lobbyService = {
   async createLobby(opts?: {
+    gridSize?: number;
     gridCols?: number;
     gridRows?: number;
     memorySeconds?: number;
   }): Promise<Lobby> {
     const code = makeGameCode(4);
-    const gridCols = opts?.gridCols ?? config.gridCols;
-    const gridRows = opts?.gridRows ?? config.gridRows;
+
+    let n = 3;
+    if (opts?.gridSize !== undefined) {
+      if (!isSupportedGridSize(opts.gridSize)) {
+        throw new GameError("BAD_REQUEST", `Unsupported grid size ${opts.gridSize}. Supported: 2x2 through 8x8.`, 400);
+      }
+      n = opts.gridSize;
+    } else if (opts?.gridCols !== undefined || opts?.gridRows !== undefined) {
+      const cols = opts.gridCols ?? opts.gridRows;
+      const rows = opts.gridRows ?? opts.gridCols;
+      if (cols !== rows || !isSupportedGridSize(cols)) {
+        throw new GameError(
+          "BAD_REQUEST",
+          `Unsupported grid dimensions ${cols}x${rows}. Only square grids (2x2 through 8x8) are supported.`,
+          400,
+        );
+      }
+      n = cols;
+    } else if (isSupportedGridSize(config.gridCols)) {
+      n = config.gridCols;
+    }
+
+    const gridCols = n;
+    const gridRows = n;
+    const pieceCount = n * n;
+
     const lobby: Lobby = {
       id: `FZ-${code}`,
       code,
@@ -322,7 +348,7 @@ export const lobbyService = {
       maxPlayers: config.maxPlayers,
       gridCols,
       gridRows,
-      pieceCount: gridCols * gridRows,
+      pieceCount,
       memory: null,
       puzzleStartedAt: null,
       winnerId: null,

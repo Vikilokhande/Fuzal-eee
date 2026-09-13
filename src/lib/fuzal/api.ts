@@ -5,8 +5,10 @@ export interface CreatedLobby {
   lobbyId: string;
   hostToken: string;
   maxPlayers: number;
+  gridSize?: number;
   gridCols: number;
   gridRows: number;
+  pieceCount?: number;
 }
 
 export interface JoinedPlayer {
@@ -37,11 +39,11 @@ async function parseError(res: Response): Promise<ApiError> {
   }
 }
 
-export async function createLobby(): Promise<CreatedLobby> {
+export async function createLobby(opts?: { gridSize?: number }): Promise<CreatedLobby> {
   const res = await fetch("/api/lobbies", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify(opts ?? {}),
   });
   if (!res.ok) throw await parseError(res);
   return res.json();

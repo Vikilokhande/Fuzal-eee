@@ -10,11 +10,13 @@ export default function LandingPage() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [gridSize, setGridSize] = useState<number>(3);
+
   async function hostGame() {
     setCreating(true);
     setError(null);
     try {
-      const lobby = await createLobby();
+      const lobby = await createLobby({ gridSize });
       sessionStore.set(`host:${lobby.code}`, {
         token: lobby.hostToken,
         createdAt: Date.now(),
@@ -26,10 +28,20 @@ export default function LandingPage() {
     }
   }
 
+  const gridOptions = [
+    { n: 2, label: "2×2", pieces: 4 },
+    { n: 3, label: "3×3", pieces: 9 },
+    { n: 4, label: "4×4", pieces: 16 },
+    { n: 5, label: "5×5", pieces: 25 },
+    { n: 6, label: "6×6", pieces: 36 },
+    { n: 7, label: "7×7", pieces: 49 },
+    { n: 8, label: "8×8", pieces: 64 },
+  ];
+
   return (
     <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden px-6 py-14">
       <div className="fz-grid-bg absolute inset-0" aria-hidden />
-      <div className="relative flex flex-col items-center gap-10 text-center">
+      <div className="relative flex flex-col items-center gap-8 text-center">
         <div className="animate-slide-up flex flex-col items-center gap-5">
           <div className="animate-float">
             <Logo size={88} />
@@ -40,6 +52,33 @@ export default function LandingPage() {
             <br />
             One big screen. Up to five phones. Memorize, scramble, win.
           </p>
+        </div>
+
+        {/* Grid Size Selection: Strictly square 2x2 through 8x8 */}
+        <div className="animate-slide-up flex flex-col items-center gap-2" style={{ animationDelay: "80ms" }}>
+          <label className="text-xs font-bold uppercase tracking-[0.25em] text-cyan-300/80">
+            Puzzle Grid Size
+          </label>
+          <div className="flex flex-wrap items-center justify-center gap-1.5 rounded-2xl bg-black/40 p-1.5 ring-1 ring-white/10 backdrop-blur-sm">
+            {gridOptions.map((opt) => {
+              const active = gridSize === opt.n;
+              return (
+                <button
+                  key={opt.n}
+                  type="button"
+                  onClick={() => setGridSize(opt.n)}
+                  className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-all duration-150 ${
+                    active
+                      ? "bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.6)] scale-[1.05]"
+                      : "text-indigo-200/70 hover:text-white hover:bg-white/5"
+                  }`}
+                >
+                  <span>{opt.label}</span>
+                  <span className="ml-1 text-[10px] opacity-75">({opt.pieces})</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <button
@@ -54,7 +93,7 @@ export default function LandingPage() {
               Creating lobby…
             </>
           ) : (
-            <>🎮 Host a Game</>
+            <>🎮 Host a Game ({gridSize}×{gridSize})</>
           )}
         </button>
         {error && <p className="text-rose-300">{error}</p>}

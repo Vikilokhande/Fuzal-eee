@@ -16,8 +16,10 @@ export async function POST(req: NextRequest) {
       lobbyId: lobby.id,
       hostToken: lobby.hostToken,
       maxPlayers: lobby.maxPlayers,
+      gridSize: lobby.gridCols,
       gridCols: lobby.gridCols,
       gridRows: lobby.gridRows,
+      pieceCount: lobby.pieceCount,
     });
   } catch (e) {
     return errorResponse(e);
