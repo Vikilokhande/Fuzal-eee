@@ -13,6 +13,7 @@ export function WinnerScreen({
   onPlayAgain,
   onBackToLobby,
   onNewLobby,
+  onExit,
 }: {
   result: ResultView;
   isHost: boolean;
@@ -20,17 +21,18 @@ export function WinnerScreen({
   onPlayAgain?: () => void;
   onBackToLobby?: () => void;
   onNewLobby?: () => void;
+  onExit?: () => void;
 }) {
   const winner = result.winner;
   const youWon = !!winner && youId === winner.id;
   const celebrate = isHost || youWon;
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center gap-8 px-6 py-10">
+    <div className="relative flex min-h-screen w-full flex-col items-center justify-center gap-6 px-3 py-6 md:px-6 md:py-10">
       <Confetti active={celebrate} />
-      <Wordmark size={36} />
+      <Wordmark size={32} />
 
-      <div className="animate-slide-up glass flex w-full max-w-2xl flex-col items-center gap-5 px-8 py-12 text-center">
+      <div className="animate-slide-up glass flex w-full max-w-xl flex-col items-center gap-4 px-4 py-6 md:gap-5 md:px-8 md:py-10 text-center">
         {isHost ? (
           winner ? (
             <>
@@ -157,9 +159,27 @@ export function WinnerScreen({
             </button>
           </div>
         ) : (
-          <p className="mt-2 animate-pulse text-indigo-200/80">
-            Waiting for the host to start the next round…
-          </p>
+          <div className="mt-4 flex w-full flex-col items-center gap-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-indigo-200/70">
+              Round Finished
+            </p>
+            <div className="flex w-full flex-col sm:flex-row items-center justify-center gap-2">
+              <button
+                type="button"
+                className="btn-secondary w-full sm:w-auto px-6 py-2.5 text-sm font-bold"
+                onClick={onBackToLobby}
+              >
+                👥 Back to Lobby
+              </button>
+              <button
+                type="button"
+                className="btn-ghost w-full sm:w-auto px-6 py-2.5 text-sm font-bold"
+                onClick={onExit}
+              >
+                🚪 Exit Game
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>

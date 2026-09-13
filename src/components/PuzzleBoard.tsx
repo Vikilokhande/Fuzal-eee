@@ -288,7 +288,7 @@ export function PuzzleBoard({
   }
 
   return (
-    <div className="relative w-full max-w-[min(94vw,560px)] select-none">
+    <div className="relative mx-auto w-full max-w-[min(94vw,min(520px,calc(100dvh-230px)))] select-none">
       {/* Loading overlay while preloading tiles */}
       {!ready && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-2xl bg-black/75 backdrop-blur-sm">
@@ -302,7 +302,7 @@ export function PuzzleBoard({
       {/* Grid container: touch-action none prevents native page scroll during touch interaction */}
       <div
         ref={boardRef}
-        className="no-select grid w-full gap-[3px] rounded-2xl bg-black/40 p-[3px] shadow-[0_18px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10"
+        className="no-select grid w-full gap-[2px] sm:gap-[3px] rounded-2xl bg-black/40 p-[2px] sm:p-[3px] shadow-[0_18px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10"
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           aspectRatio: "1 / 1",

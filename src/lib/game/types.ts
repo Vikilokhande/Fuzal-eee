@@ -120,13 +120,18 @@ export const EventType = {
   PLAYER_COMPLETED: "PLAYER_COMPLETED",
   PLAYER_ELIMINATED: "PLAYER_ELIMINATED",
   GAME_FINISHED: "GAME_FINISHED",
+  GAME_TIMEOUT: "GAME_TIMEOUT",
+  RESULTS_READY: "RESULTS_READY",
   NEW_GAME: "NEW_GAME",
+  LOBBY_RESET: "LOBBY_RESET",
+  GAME_CLOSED: "GAME_CLOSED",
 } as const;
 export type EventType = (typeof EventType)[keyof typeof EventType];
 
 export interface GameEvent<T = unknown> {
   type: EventType;
   at: number;
+  eventId?: number;
   lobbyId?: string;
   payload: T;
 }

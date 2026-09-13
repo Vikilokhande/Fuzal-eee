@@ -99,7 +99,7 @@ export default function HostPage() {
   const totalPieces = state.gridCols * state.gridRows;
 
   return (
-    <main className="relative min-h-screen overflow-hidden px-6 py-8 md:px-12">
+    <main className="relative min-h-screen w-full overflow-x-hidden px-3 py-6 sm:px-6 md:px-12 md:py-8">
       <div className="fz-grid-bg absolute inset-0" aria-hidden />
       <ConnBanner state={connState} />
       {toast && (
@@ -121,50 +121,50 @@ export default function HostPage() {
 
       {/* LOBBY */}
       {state.status === "LOBBY" && (
-        <div className="relative mx-auto flex min-h-[calc(100vh-4rem)] max-w-6xl flex-col items-center gap-8">
-          <div className="animate-slide-up mt-2 flex flex-col items-center gap-3">
-            <Wordmark size={64} />
-            <p className="text-lg font-semibold uppercase tracking-[0.4em] text-cyan-200/90 md:text-xl">
+        <div className="relative mx-auto flex min-h-[calc(100vh-3rem)] w-full max-w-6xl flex-col items-center gap-6 sm:gap-8">
+          <div className="animate-slide-up mt-1 sm:mt-2 flex flex-col items-center gap-2 sm:gap-3 text-center">
+            <Wordmark size={44} />
+            <p className="text-sm sm:text-lg font-semibold uppercase tracking-[0.3em] sm:tracking-[0.4em] text-cyan-200/90">
               Scan to Join the Game
             </p>
           </div>
 
-          <div className="grid w-full flex-1 items-center gap-10 md:grid-cols-[1.05fr_1fr]">
-            <div className="glass flex flex-col items-center gap-6 px-8 py-10">
-              <QRCodeDisplay code={code} size={250} />
-              <p className="text-center text-sm text-indigo-100/70">
+          <div className="flex w-full flex-col items-center gap-6 md:grid md:grid-cols-[1.05fr_1fr] md:gap-10">
+            <div className="glass flex w-full max-w-md flex-col items-center gap-4 sm:gap-6 px-4 py-6 sm:px-8 sm:py-8">
+              <QRCodeDisplay code={code} size={220} />
+              <p className="text-center text-xs sm:text-sm text-indigo-100/70">
                 Point your phone camera at the QR code —
                 <br />
                 it opens instantly in your mobile browser.
               </p>
             </div>
 
-            <div className="flex flex-col gap-6">
-              <div className="glass px-7 py-5 text-center">
-                <p className="text-xs font-bold uppercase tracking-[0.35em] text-indigo-200/70">
+            <div className="flex w-full max-w-md flex-col gap-4 sm:gap-6">
+              <div className="glass px-5 py-4 text-center">
+                <p className="text-xs font-bold uppercase tracking-[0.3em] text-indigo-200/70">
                   Players Joined
                 </p>
-                <p className="font-display text-6xl font-bold text-white">
+                <p className="font-display text-4xl sm:text-6xl font-bold text-white">
                   <span className="neon-text">{players.length}</span>
-                  <span className="text-3xl text-white/50"> / {state.maxPlayers}</span>
+                  <span className="text-2xl sm:text-3xl text-white/50"> / {state.maxPlayers}</span>
                 </p>
               </div>
               <PlayerSlots players={players} maxPlayers={state.maxPlayers} />
               <button
                 onClick={actions.startGame}
                 disabled={!canStart}
-                className="btn-primary w-full text-2xl"
+                className="btn-primary w-full text-lg sm:text-2xl py-3 sm:py-4"
               >
                 {canStart ? "🚀 START GAME" : "⏳ Waiting for players…"}
               </button>
               {!canStart && (
-                <p className="text-center text-sm text-indigo-200/70">
+                <p className="text-center text-xs sm:text-sm text-indigo-200/70">
                   At least one player must join before starting.
                 </p>
               )}
               <button
                 onClick={newLobby}
-                className="text-center text-sm text-indigo-200/60 underline-offset-4 hover:underline"
+                className="text-center text-xs sm:text-sm text-indigo-200/60 underline-offset-4 hover:underline"
               >
                 Generate a new lobby / QR code
               </button>

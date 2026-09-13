@@ -255,7 +255,7 @@ export const lobbyService = {
     }
     const player = findPlayer(lobby, opts.playerId ?? "");
     if (!player || !opts.playerToken || !safeEqual(opts.playerToken, player.token)) {
-      throw new GameError("FORBIDDEN", "Invalid player session.", 403);
+      throw new GameError("SESSION_EXPIRED", "Player session expired or not found in lobby.", 410);
     }
     // Reconnect: cancel pending removal / flip status back to connected.
     const pending = lobby.disconnectTimers?.[player.id];
@@ -977,13 +977,39 @@ export const gameService = {
     });
   },
 
-  /** FINISHED → LOBBY (let new players join / adjust, then START again). */
+  /** FINISHED → LOBBY: Authoritatively resets the lobby to clean waiting state with 0 active players. */
   async backToLobby(code: string, hostToken: string): Promise<void> {
     const lobby = await lobbyService.getLobby(code);
     await withLobbyLock(lobby, async () => {
       assertHost(lobby, hostToken);
-      assertTransition(lobby, GameState.LOBBY);
       clearLobbyTimers(lobby);
+
+      // 1. Mark previous game round as permanently finished
+      if (lobby.currentGameId) {
+        await supabaseAdmin
+          .from("games")
+          .update({
+            state: GameState.FINISHED,
+            finished_at: new Date().toISOString(),
+          })
+          .eq("id", lobby.currentGameId);
+      }
+
+      // 2. Authoritatively deactivate all players for this lobby in Supabase
+      const { data: lobbyRow } = await supabaseAdmin
+        .from("lobbies")
+        .select("id")
+        .eq("code", code.toUpperCase())
+        .maybeSingle();
+
+      if (lobbyRow) {
+        await supabaseAdmin
+          .from("players")
+          .update({ active: false, connected: false })
+          .eq("lobby_id", lobbyRow.id);
+      }
+
+      // 3. Reset all game & lobby state to a clean waiting state with 0 active players
       lobby.status = GameState.LOBBY;
       lobby.memory = null;
       lobby.puzzleStartedAt = null;
@@ -992,17 +1018,26 @@ export const gameService = {
       lobby.winnerId = null;
       lobby.finishedAt = null;
       lobby.currentGameId = null;
-      for (const p of lobby.players) {
-        p.puzzle = null;
-        p.eliminated = false;
-      }
+      lobby.players = []; // Clean lobby contains ZERO active players!
+      lobby.disconnectTimers = {};
+
+      // 4. Persist clean lobby to Supabase
       await lobbyRepo.put(lobby);
-      manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));
+
+      // 5. Broadcast LOBBY_RESET and GAME_CLOSED so connected clients exit cleanly
+      manager.broadcast(
+        code,
+        ev(EventType.LOBBY_RESET, { status: lobby.status, players: [] }, lobby.id),
+      );
+      manager.broadcast(
+        code,
+        ev(EventType.GAME_CLOSED, { reason: "HOST_RESET" }, lobby.id),
+      );
       manager.broadcast(
         code,
         ev(
           EventType.LOBBY_UPDATED,
-          { players: lobby.players.map(publicPlayer), status: lobby.status },
+          { players: [], status: lobby.status },
           lobby.id,
         ),
       );

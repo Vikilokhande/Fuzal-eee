@@ -85,32 +85,31 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
       const lobbyDbId = lobbyRow.id;
 
-      // 2. Sync players
+      // 2. Batch sync players (1 query instead of sequential loop)
       if (lobby.players.length > 0) {
-        for (const p of lobby.players) {
-          const { error: pErr } = await supabaseAdmin.from("players").upsert(
-            {
-              id: p.id,
-              lobby_id: lobbyDbId,
-              name: p.name,
-              player_token_hash: p.token,
-              connected: p.connectionStatus === PlayerConnection.CONNECTED,
-              score: p.score,
-              slot: Math.max(1, Math.min(5, p.slot || 1)),
-              last_seen_at: new Date().toISOString(),
-            },
-            { onConflict: "id" },
-          );
-          if (pErr) {
-            console.error(`[REPO_ERROR] Failed to upsert player ${p.id}:`, pErr.message);
-          }
+        const playerRows = lobby.players.map((p) => ({
+          id: p.id,
+          lobby_id: lobbyDbId,
+          name: p.name,
+          player_token_hash: p.token,
+          connected: p.connectionStatus === PlayerConnection.CONNECTED,
+          score: p.score,
+          slot: Math.max(1, Math.min(5, p.slot || 1)),
+          active: true,
+          last_seen_at: new Date().toISOString(),
+        }));
+        const { error: pErr } = await supabaseAdmin
+          .from("players")
+          .upsert(playerRows, { onConflict: "id" });
+        if (pErr) {
+          console.error(`[REPO_ERROR] Failed to batch upsert players:`, pErr.message);
         }
       }
 
-      // 3. Sync current game if active
+      // 3. Sync current game & player boards in parallel
       if (lobby.currentGameId) {
         const gameStatus = lobby.status === GameState.LOBBY ? GameState.FINISHED : lobby.status;
-        const { error: gameErr } = await supabaseAdmin
+        const gamePromise = supabaseAdmin
           .from("games")
           .update({
             state: gameStatus,
@@ -130,34 +129,34 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           })
           .eq("id", lobby.currentGameId);
 
-        if (gameErr) {
-          console.error(`[REPO_ERROR] Failed to update game ${lobby.currentGameId}:`, gameErr.message);
-        }
+        const gpRows = lobby.players
+          .filter((p) => p.puzzle)
+          .map((p) => ({
+            game_id: lobby.currentGameId,
+            player_id: p.id,
+            board: p.puzzle!.board,
+            moves: p.puzzle!.moves,
+            correct_slots: correctSlots(p.puzzle!.board).filter(Boolean).length,
+            completed: p.puzzle!.completed,
+            started_at: new Date(p.puzzle!.startedAt).toISOString(),
+            completed_at: p.puzzle!.completedAt
+              ? new Date(p.puzzle!.completedAt).toISOString()
+              : null,
+          }));
 
-        // 4. Sync player boards in game_players
-        for (const p of lobby.players) {
-          if (p.puzzle) {
-            const { error: gpErr } = await supabaseAdmin
-              .from("game_players")
-              .upsert(
-                {
-                  game_id: lobby.currentGameId,
-                  player_id: p.id,
-                  board: p.puzzle.board,
-                  moves: p.puzzle.moves,
-                  correct_slots: correctSlots(p.puzzle.board).filter(Boolean).length,
-                  completed: p.puzzle.completed,
-                  started_at: new Date(p.puzzle.startedAt).toISOString(),
-                  completed_at: p.puzzle.completedAt
-                    ? new Date(p.puzzle.completedAt).toISOString()
-                    : null,
-                },
-                { onConflict: "game_id,player_id" },
-              );
-            if (gpErr) {
-              console.error(`[REPO_ERROR] Failed to sync game_player for ${p.id}:`, gpErr.message);
-            }
-          }
+        const gpPromise =
+          gpRows.length > 0
+            ? supabaseAdmin
+                .from("game_players")
+                .upsert(gpRows, { onConflict: "game_id,player_id" })
+            : Promise.resolve({ error: null });
+
+        const [gameRes, gpRes] = await Promise.all([gamePromise, gpPromise]);
+        if (gameRes.error) {
+          console.error(`[REPO_ERROR] Failed to update game ${lobby.currentGameId}:`, gameRes.error.message);
+        }
+        if (gpRes.error) {
+          console.error(`[REPO_ERROR] Failed to batch upsert game_players:`, gpRes.error.message);
         }
       }
     } catch (err: any) {
@@ -212,34 +211,34 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         return null;
       }
 
-      // 2. Fetch players for this lobby
-      const { data: playerRows } = await supabaseAdmin
-        .from("players")
-        .select("*")
-        .eq("lobby_id", lobbyRow.id)
-        .order("slot", { ascending: true });
+      // 2 & 3. Parallel fetch: active players, current game, and game_players
+      const [playersRes, gameRes, gpRes] = await Promise.all([
+        supabaseAdmin
+          .from("players")
+          .select("*")
+          .eq("lobby_id", lobbyRow.id)
+          .eq("active", true)
+          .order("slot", { ascending: true }),
+        lobbyRow.current_game_id
+          ? supabaseAdmin
+              .from("games")
+              .select("*, puzzle_images(*)")
+              .eq("id", lobbyRow.current_game_id)
+              .maybeSingle()
+          : Promise.resolve({ data: null }),
+        lobbyRow.current_game_id
+          ? supabaseAdmin
+              .from("game_players")
+              .select("*")
+              .eq("game_id", lobbyRow.current_game_id)
+          : Promise.resolve({ data: [] }),
+      ]);
 
-      // 3. Fetch current game if exists
-      let gameRow: Record<string, any> | null = null;
-      let gamePlayerMap = new Map<string, Record<string, any>>();
-
-      if (lobbyRow.current_game_id) {
-        const { data: g } = await supabaseAdmin
-          .from("games")
-          .select("*, puzzle_images(*)")
-          .eq("id", lobbyRow.current_game_id)
-          .maybeSingle();
-        gameRow = g;
-
-        if (gameRow) {
-          const { data: gpRows } = await supabaseAdmin
-            .from("game_players")
-            .select("*")
-            .eq("game_id", lobbyRow.current_game_id);
-          for (const gp of gpRows ?? []) {
-            gamePlayerMap.set(gp.player_id, gp);
-          }
-        }
+      const playerRows = playersRes.data ?? [];
+      const gameRow: Record<string, any> | null = gameRes.data;
+      const gamePlayerMap = new Map<string, Record<string, any>>();
+      for (const gp of gpRes.data ?? []) {
+        gamePlayerMap.set(gp.player_id, gp);
       }
 
       // 4. Hydrate runtime player objects

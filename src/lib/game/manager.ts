@@ -18,12 +18,99 @@
  *  - seamless reconnects (same player id replaces a dead socket; the service
  *    layer then replays a full SNAPSHOT)
  */
-import type { GameEvent } from "./types";
+import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
+import type { GameEvent, EventType } from "./types";
 
 export interface Subscriber {
   /** `host:<tokenhash>` for the big screen, the player id for phones. */
   id: string;
-  send: (frame: string) => void;
+  send: (frame: string, eventId?: number) => void;
+}
+
+/** Asynchronously records event in Supabase lobby_events without blocking response */
+async function persistEvent(
+  code: string,
+  event: GameEvent,
+  targetId?: string | null,
+  gameId?: string | null,
+): Promise<number | undefined> {
+  if (!isSupabaseConfigured()) return undefined;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("lobby_events")
+      .insert({
+        lobby_code: code.toUpperCase(),
+        game_id: gameId ?? null,
+        event_type: event.type,
+        payload: event.payload as any,
+        target_id: targetId ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.warn(`[EVENT_PERSIST_WARN] ${event.type}:`, error.message);
+      return undefined;
+    }
+    return data?.id ? Number(data.id) : undefined;
+  } catch (err: any) {
+    console.warn(`[EVENT_PERSIST_ERR] ${event.type}:`, err?.message);
+    return undefined;
+  }
+}
+
+/** Fetches missed events after a given monotonic cursor */
+export async function getEventsAfter(
+  code: string,
+  afterId: number,
+  targetId?: string,
+): Promise<Array<{ id: number; type: EventType; payload: any; at: number; gameId?: string | null }>> {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("lobby_events")
+      .select("id, event_type, payload, target_id, game_id, created_at")
+      .eq("lobby_code", code.toUpperCase())
+      .gt("id", afterId)
+      .order("id", { ascending: true })
+      .limit(100);
+
+    if (error || !data) return [];
+
+    return data
+      .filter((row) => {
+        if (!row.target_id) return true; // broadcast
+        if (targetId?.startsWith("host:") && row.target_id === "host") return true;
+        if (targetId && row.target_id === targetId) return true;
+        return false;
+      })
+      .map((row) => ({
+        id: Number(row.id),
+        type: row.event_type as EventType,
+        payload: row.payload,
+        at: new Date(row.created_at).getTime(),
+        gameId: row.game_id,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** Gets the latest event ID for cursor anchoring */
+export async function getLatestEventId(code: string): Promise<number> {
+  if (!isSupabaseConfigured()) return 0;
+  try {
+    const { data } = await supabaseAdmin
+      .from("lobby_events")
+      .select("id")
+      .eq("lobby_code", code.toUpperCase())
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return data?.id ? Number(data.id) : 0;
+  } catch {
+    return 0;
+  }
 }
 
 class ConnectionManager {
@@ -35,7 +122,6 @@ class ConnectionManager {
       channel = new Set();
       this.channels.set(code, channel);
     }
-    // A reconnecting client replaces its previous dead socket.
     for (const existing of channel) {
       if (existing.id === sub.id) channel.delete(existing);
     }
@@ -52,22 +138,26 @@ class ConnectionManager {
   }
 
   /** Send to everyone in the lobby. */
-  broadcast(code: string, event: GameEvent): void {
+  broadcast(code: string, event: GameEvent, gameId?: string | null): void {
+    void persistEvent(code, event, null, gameId);
     this.deliver(code, () => true, event);
   }
 
   /** Send to every phone (never the host). */
-  broadcastToPlayers(code: string, event: GameEvent): void {
+  broadcastToPlayers(code: string, event: GameEvent, gameId?: string | null): void {
+    void persistEvent(code, event, "players", gameId);
     this.deliver(code, (id) => !id.startsWith("host:"), event);
   }
 
-  /** Send to the host only (e.g. the un-cropped memory image). */
-  sendToHost(code: string, event: GameEvent): void {
+  /** Send to the host only. */
+  sendToHost(code: string, event: GameEvent, gameId?: string | null): void {
+    void persistEvent(code, event, "host", gameId);
     this.deliver(code, (id) => id.startsWith("host:"), event);
   }
 
-  /** Send to a single player (personal puzzle/move results). */
-  sendToPlayer(code: string, playerId: string, event: GameEvent): void {
+  /** Send to a single player. */
+  sendToPlayer(code: string, playerId: string, event: GameEvent, gameId?: string | null): void {
+    void persistEvent(code, event, playerId, gameId);
     this.deliver(code, (id) => id === playerId, event);
   }
 
@@ -82,7 +172,7 @@ class ConnectionManager {
     for (const sub of channel) {
       if (!match(sub.id)) continue;
       try {
-        sub.send(frame);
+        sub.send(frame, event.eventId);
       } catch {
         channel.delete(sub);
       }
@@ -99,3 +189,4 @@ export const manager: ConnectionManager =
 if (process.env.NODE_ENV !== "production") {
   globalForManager.__fuzalManager = manager;
 }
+

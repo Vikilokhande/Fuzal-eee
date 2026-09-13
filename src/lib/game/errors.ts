@@ -9,6 +9,7 @@ export class GameError extends Error {
       | "CONFLICT"
       | "INVALID_STATE"
       | "TIME_EXPIRED"
+      | "SESSION_EXPIRED"
       | "INTERNAL_ERROR",
     message: string,
     public httpStatus = 400,

@@ -1,6 +1,6 @@
-import { manager } from "@/lib/game/manager";
+import { manager, getEventsAfter, getLatestEventId } from "@/lib/game/manager";
 import { lobbyService } from "@/lib/game/service";
-import { LOBBY_CODE_RE, PLAYER_ID_RE } from "@/lib/game/types";
+import { LOBBY_CODE_RE, PLAYER_ID_RE, EventType } from "@/lib/game/types";
 import { errorResponse } from "@/lib/game/http";
 
 export const dynamic = "force-dynamic";
@@ -8,19 +8,20 @@ export const runtime = "nodejs";
 
 /**
  * GET /api/lobbies/:code/events?kind=host&t=hostToken
- * GET /api/lobbies/:code/events?kind=player&p=playerId&t=playerToken
+ * GET /api/lobbies/:code/events?kind=player&p=playerId&t=playerToken&after=123
  *
- * Server-Sent Events channel (lobby-scoped, like /lobby/FZ-XXXX on the
- * FastAPI reference). Delivers a full role-specific SNAPSHOT first, then live
- * events. The client auto-reconnects with EventSource; reconnecting with the
- * same player id restores the session and game state.
+ * Vercel-safe Server-Sent Events channel:
+ * - Bounded stream duration (25s) prevents Vercel 300s serverless task timeouts.
+ * - Monotonically increasing event IDs with ?after=<cursor> replay ensures zero lost events across serverless instances.
+ * - Graceful session expiration returns controlled status codes to stop reconnect loops.
  */
 export async function GET(
   req: Request,
   ctx: { params: Promise<{ code: string }> },
 ) {
   const { code } = await ctx.params;
-  if (!LOBBY_CODE_RE.test(code)) {
+  const upperCode = code.toUpperCase();
+  if (!LOBBY_CODE_RE.test(upperCode)) {
     return Response.json(
       { error: "BAD_REQUEST", message: "Invalid game code." },
       { status: 400 },
@@ -28,69 +29,134 @@ export async function GET(
   }
 
   const url = new URL(req.url);
+  const isVerifyOnly = url.searchParams.get("verify") === "1";
   const kind = url.searchParams.get("kind") === "host" ? "host" : "player";
   const hostToken = url.searchParams.get("t") ?? "";
   const playerId = url.searchParams.get("p") ?? "";
   const playerToken = url.searchParams.get("t") ?? "";
+  const afterParam = url.searchParams.get("after");
+  const afterId = afterParam !== null && afterParam !== "" ? parseInt(afterParam, 10) : null;
 
   if (kind === "host" ? hostToken.length < 10 : !PLAYER_ID_RE.test(playerId)) {
     return Response.json(
-      { error: "FORBIDDEN", message: "Invalid connection parameters." },
+      { error: "FORBIDDEN", code: "INVALID_PARAMETERS", message: "Invalid connection parameters." },
       { status: 403 },
     );
   }
 
   let connected: Awaited<ReturnType<typeof lobbyService.handleConnect>>;
   try {
-    connected = await lobbyService.handleConnect(code, {
+    connected = await lobbyService.handleConnect(upperCode, {
       hostToken: kind === "host" ? hostToken : undefined,
       playerId: kind === "player" ? playerId : undefined,
       playerToken: kind === "player" ? playerToken : undefined,
     });
-  } catch (e) {
-    return errorResponse(e);
+  } catch (e: any) {
+    if (isVerifyOnly) {
+      return errorResponse(e);
+    }
+    // If the client requested SSE, return a controlled SESSION_EXPIRED frame before closing
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const frame = JSON.stringify({
+            type: "SESSION_EXPIRED",
+            error: e?.code ?? "SESSION_EXPIRED",
+            message: e?.message ?? "Session expired or lobby was reset.",
+          });
+          controller.enqueue(encoder.encode(`event: session_expired\ndata: ${frame}\n\n`));
+          controller.close();
+        },
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+        },
+      },
+    );
   }
-  const { lobby, player } = connected;
 
+  if (isVerifyOnly) {
+    return Response.json({ ok: true, status: connected.lobby.status });
+  }
+
+  const { lobby, player } = connected;
   const encoder = new TextEncoder();
-  const subscribeId = kind === "host" ? `host:${code}` : playerId!;
+  const subscribeId = kind === "host" ? `host:${upperCode}` : playerId!;
   let closed = false;
+  let cleanup = () => {};
 
   const stream = new ReadableStream({
-    start(controller) {
-      const sendFrame = (frame: string) => {
+    async start(controller) {
+      const sendFrame = (frame: string, eventId?: number, eventName?: string) => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(`data: ${frame}\n\n`));
+          const idPrefix = eventId !== undefined ? `id: ${eventId}\n` : "";
+          const eventPrefix = eventName ? `event: ${eventName}\n` : "";
+          controller.enqueue(encoder.encode(`${eventPrefix}${idPrefix}data: ${frame}\n\n`));
         } catch {
           closed = true;
         }
       };
 
-      const unsubscribe = manager.connect(code, {
+      // 1. Subscribe to in-process broadcasts
+      const unsubscribe = manager.connect(upperCode, {
         id: subscribeId,
-        send: (frame) => sendFrame(frame),
+        send: (frame, eventId) => sendFrame(frame, eventId),
       });
 
-      // Authoritative catch-up snapshot (covers disconnect/reconnect gaps).
-      sendFrame(JSON.stringify(lobbyService.buildSnapshot(lobby, kind, player)));
+      // 2. Deliver catch-up: either missed events after cursor, or initial full snapshot
+      try {
+        if (afterId !== null && !isNaN(afterId) && afterId >= 0) {
+          const missedEvents = await getEventsAfter(upperCode, afterId, subscribeId);
+          for (const ev of missedEvents) {
+            sendFrame(
+              JSON.stringify({
+                type: ev.type,
+                payload: ev.payload,
+                at: ev.at,
+                eventId: ev.id,
+              }),
+              ev.id,
+            );
+          }
+        } else {
+          // Fresh connection: anchor cursor with latest event ID
+          const latestId = await getLatestEventId(upperCode);
+          sendFrame(JSON.stringify(lobbyService.buildSnapshot(lobby, kind, player)), latestId);
+        }
+      } catch (catchUpErr) {
+        console.warn("[CATCHUP_WARN]", catchUpErr);
+      }
 
+      // 3. Heartbeat every 8s
       const heartbeat = setInterval(() => {
+        if (closed) return;
         try {
           controller.enqueue(encoder.encode(`: ping\n\n`));
         } catch {
-          /* closed */
+          cleanup();
         }
-      }, 20000);
+      }, 8000);
+      heartbeat.unref?.();
 
-      const cleanup = () => {
+      // 4. Bounded connection: rotate cleanly after 25s (prevents Vercel 300s timeout)
+      const rotateTimer = setTimeout(() => {
+        if (closed) return;
+        sendFrame(JSON.stringify({ type: "STREAM_END", at: Date.now() }), undefined, "stream_end");
+        cleanup();
+      }, 25000);
+      rotateTimer.unref?.();
+
+      cleanup = () => {
         if (closed) return;
         closed = true;
         clearInterval(heartbeat);
+        clearTimeout(rotateTimer);
         unsubscribe();
-        if (kind === "player" && playerId) {
-          void lobbyService.handleDisconnect(code, playerId);
-        }
         try {
           controller.close();
         } catch {
@@ -101,7 +167,7 @@ export async function GET(
       req.signal.addEventListener("abort", cleanup);
     },
     cancel() {
-      closed = true;
+      cleanup();
     },
   });
 
@@ -114,3 +180,4 @@ export async function GET(
     },
   });
 }
+

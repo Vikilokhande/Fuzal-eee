@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FuzalSocket, type ConnectionState } from "./realtime";
-import { pieceUrl, postAction } from "./api";
+import { pieceUrl, postAction, sessionStore } from "./api";
 import { EventType, type GameEvent, type GameState } from "@/lib/game/types";
 import { swapPieces, correctSlots as computeCorrect, isSolved } from "@/lib/game/puzzle";
 
@@ -245,6 +245,38 @@ export function useFuzalGame(opts: UseOpts) {
           next.puzzleDurationSeconds = null;
           break;
         }
+        case EventType.GAME_TIMEOUT: {
+          showToast("Time's up! The 3-minute limit expired.");
+          if (next.puzzle && !next.puzzle.completed) {
+            next.puzzle = { ...next.puzzle, eliminated: true };
+          }
+          break;
+        }
+        case EventType.RESULTS_READY: {
+          next.status = "FINISHED";
+          if (p) next.result = p as unknown as ResultView;
+          break;
+        }
+        case EventType.LOBBY_RESET:
+        case EventType.GAME_CLOSED: {
+          next.status = "LOBBY";
+          next.result = null;
+          next.puzzle = null;
+          next.puzzleProgress = null;
+          next.players = Array.isArray(p?.players) ? (p.players as PlayerView[]) : [];
+          next.memory = null;
+          next.puzzleStartedAt = null;
+          next.puzzleEndsAt = null;
+          next.puzzleDurationSeconds = null;
+          if (opts.kind === "player") {
+            try {
+              sessionStore.remove("fuzal_player_session");
+              sessionStore.remove(`player:${opts.code}`);
+            } catch {}
+            showToast("Lobby was reset by host. Session closed.");
+          }
+          break;
+        }
         case EventType.ERROR: {
           showToast((p.message as string) ?? "Something went wrong.");
           break;
@@ -252,7 +284,7 @@ export function useFuzalGame(opts: UseOpts) {
       }
       return next;
     });
-  }, [showToast]);
+  }, [opts.code, opts.kind, showToast]);
 
   useEffect(() => {
     const socket = new FuzalSocket({
@@ -263,6 +295,18 @@ export function useFuzalGame(opts: UseOpts) {
       playerToken: opts.playerToken,
       onEvent: applyEvent,
       onStateChange: setConnState,
+      onSessionExpired: () => {
+        if (opts.kind === "player") {
+          try {
+            sessionStore.remove("fuzal_player_session");
+            sessionStore.remove(`player:${opts.code}`);
+          } catch {}
+          showToast("Game session has ended or was reset by the host.");
+          setState((prev) =>
+            prev ? { ...prev, status: "LOBBY", puzzle: null, result: null, players: [] } : null,
+          );
+        }
+      },
     });
     socketRef.current = socket;
     socket.connect();
@@ -561,6 +605,15 @@ export function useFuzalGame(opts: UseOpts) {
     pieceSrcs,
   ]);
 
+  const exitGame = useCallback(() => {
+    socketRef.current?.disconnect();
+    try {
+      sessionStore.remove("fuzal_player_session");
+      sessionStore.remove(`player:${opts.code}`);
+    } catch {}
+    setState(null);
+  }, [opts.code]);
+
   return {
     state,
     connState,
@@ -575,6 +628,6 @@ export function useFuzalGame(opts: UseOpts) {
     piecesLoading,
     piecesError,
     retryLoadPieces,
-    actions: { startGame, swap, playAgain, backToLobby },
+    actions: { startGame, swap, playAgain, backToLobby, exitGame },
   };
 }
