@@ -38,9 +38,9 @@ export async function GET(
     const token = url.searchParams.get("t") ?? "";
 
     const piece = Number(pieceParam);
-    if (!Number.isInteger(piece) || piece < 0 || piece >= 16) {
+    if (!Number.isInteger(piece) || piece < 0 || piece >= 36) {
       return Response.json(
-        { error: "BAD_REQUEST", message: "Invalid piece index (must be 0..15)." },
+        { error: "BAD_REQUEST", message: "Invalid piece index." },
         { status: 400 },
       );
     }

@@ -20,6 +20,7 @@ import {
   type Player,
   type PuzzleInstance,
 } from "./types";
+import { config } from "./config";
 import { GameError } from "./errors";
 
 export interface LobbyRepository {
@@ -442,8 +443,8 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           status: lobbyRow.status as GameState,
           players,
           maxPlayers: lobbyRow.max_players ?? 5,
-          gridCols: 4,
-          gridRows: 4,
+          gridCols: config.gridCols,
+          gridRows: config.gridRows,
           currentGameId: lobbyRow.current_game_id ?? null,
           memory,
           puzzleStartedAt,

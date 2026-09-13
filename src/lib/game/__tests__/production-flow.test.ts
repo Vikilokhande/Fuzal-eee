@@ -85,8 +85,8 @@ describe("Production Serverless Flow & Error Handling", () => {
     const img = inMem!.memory!.image;
     const slug = img.slug ?? img.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
-    // Verify pieces 0 and 15 exist in Supabase Storage as valid WebP
-    for (const pieceIdx of [0, 15]) {
+    // Verify pieces 0 and 8 exist in Supabase Storage as valid WebP
+    for (const pieceIdx of [0, 8]) {
       const pieceStr = String(pieceIdx).padStart(2, "0");
       const path = `${slug}/pieces/${pieceStr}.webp`;
       const { data, error } = await supabaseAdmin.storage
@@ -170,8 +170,8 @@ describe("Production Serverless Flow & Error Handling", () => {
 
     const liveLobby = (lobbyRepo as any).processLobbies?.get(lobby.code);
 
-    // Call piece endpoint for piece 0 and piece 15
-    for (const pieceIdx of [0, 15]) {
+    // Call piece endpoint for piece 0 and piece 8
+    for (const pieceIdx of [0, 8]) {
       const req = new Request(
         `http://localhost:3000/api/lobbies/${lobby.code}/piece/${pieceIdx}?p=${player.id}&t=${player.token}`,
       );
@@ -190,7 +190,7 @@ describe("Production Serverless Flow & Error Handling", () => {
     if (liveLobby.endTimeout) clearTimeout(liveLobby.endTimeout);
   });
 
-  it("delivers all 16 WebP pieces in a single fast batch request via /api/lobbies/[code]/pieces", async () => {
+  it("delivers all 9 WebP pieces in a single fast batch request via /api/lobbies/[code]/pieces", async () => {
     const lobby = await lobbyService.createLobby();
     const { player } = await lobbyService.join(lobby.code, "BatchTester");
     await gameService.startGame(lobby.code, lobby.hostToken);
@@ -210,9 +210,9 @@ describe("Production Serverless Flow & Error Handling", () => {
     expect(body.ok).toBe(true);
     expect(body.slug).toBeTruthy();
     expect(body.pieces).toBeTruthy();
-    expect(Object.keys(body.pieces).length).toBe(16);
+    expect(Object.keys(body.pieces).length).toBe(9);
 
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 9; i++) {
       expect(body.pieces[i]).toMatch(/^data:image\/webp;base64,/);
       expect(body.pieces[i].length).toBeGreaterThan(200);
     }

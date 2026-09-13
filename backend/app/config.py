@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     max_players: int = 5
     memory_seconds: int = 30
     puzzle_seconds: int = 180
-    grid_cols: int = 4
-    grid_rows: int = 4
+    grid_cols: int = 3
+    grid_rows: int = 3
     disconnect_grace_ms: int = 8000
     cors_origins: list[str] = ["*"]
     images_dir: Path = Path(__file__).resolve().parent.parent / "images"

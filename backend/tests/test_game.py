@@ -137,7 +137,7 @@ def test_puzzle_independent_and_hidden_from_host(svc):
 
 
 def one_swap_from_solved(player, pair):
-    board = list(range(16))
+    board = list(range(len(player.puzzle.board)))
     a, b = pair
     board[a], board[b] = board[b], board[a]
     player.puzzle.board = board

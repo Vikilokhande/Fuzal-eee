@@ -41,7 +41,8 @@ async function clearTimers(code: string) {
 async function moveOneFromSolved(code: string, playerIndex: number, swap: [number, number]) {
   const lobby = await lobbyRepo.getByCode(code);
   const player = lobby!.players[playerIndex];
-  const board = Array.from({ length: 16 }, (_, i) => i);
+  const total = (lobby?.gridCols ?? 3) * (lobby?.gridRows ?? 3);
+  const board = Array.from({ length: total }, (_, i) => i);
   const [a, b] = swap;
   [board[a], board[b]] = [board[b], board[a]];
   player.puzzle!.board = board;
@@ -137,7 +138,7 @@ describe("state machine & timer", () => {
     const p0Puzzle = payloadsOf(p0.frames, EventType.PUZZLE_STARTED);
     expect(hostPuzzle.some((p) => Array.isArray(p.board))).toBe(false); // host never sees boards
     const personalPuzzle = p0Puzzle.find((p) => Array.isArray(p.board));
-    expect(personalPuzzle?.board).toHaveLength(16); // personal shuffled board
+    expect(personalPuzzle?.board).toHaveLength(9); // personal shuffled board
 
     host.off();
     p0.off();
@@ -151,7 +152,7 @@ describe("state machine & timer", () => {
     const lobby = await lobbyRepo.getByCode(setup.code);
     const boards = lobby!.players.map((p) => p.puzzle!.board);
     for (const b of boards) {
-      expect(b).toHaveLength(16);
+      expect(b).toHaveLength(9);
       expect(b.every((piece, slot) => piece === slot)).toBe(false);
     }
     // Independent shuffles: not every board identical (overwhelmingly likely).

@@ -26,13 +26,13 @@ describe("Supabase Storage & Puzzle Asset Verification", () => {
     for (const slug of SLUGS) {
       const found = rows!.find((r) => r.storage_path === slug);
       expect(found).toBeTruthy();
-      expect(found!.grid_rows).toBe(4);
-      expect(found!.grid_columns).toBe(4);
+      expect(found!.grid_rows).toBe(3);
+      expect(found!.grid_columns).toBe(3);
       expect(found!.mime_type).toBe("image/webp");
     }
   });
 
-  it("verifies original.webp and all 16 WebP pieces exist in Supabase Storage with HTTP 200 and image/webp", async () => {
+  it("verifies original.webp and all 9 WebP pieces exist in Supabase Storage with HTTP 200 and image/webp", async () => {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 
     const checks: Promise<void>[] = [];
@@ -48,8 +48,8 @@ describe("Supabase Storage & Puzzle Asset Verification", () => {
         })(),
       );
 
-      // 2. Verify all 16 pre-generated tiles (00.webp ... 15.webp)
-      for (let pieceId = 0; pieceId < 16; pieceId++) {
+      // 2. Verify all 9 pre-generated tiles (00.webp ... 08.webp)
+      for (let pieceId = 0; pieceId < 9; pieceId++) {
         const pieceStr = String(pieceId).padStart(2, "0");
         checks.push(
           (async () => {

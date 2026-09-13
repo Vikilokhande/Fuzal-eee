@@ -35,7 +35,8 @@ describe("Session Lifecycle, Reset, Vercel-Safe SSE, and Isolation", () => {
 
     // 3. Setup Alice's puzzle to be 1 move away from solved and complete it
     const alice = activeLobby!.players.find((p) => p.id === p1.id)!;
-    const board = Array.from({ length: 16 }, (_, i) => i);
+    const total = (activeLobby?.gridCols ?? 3) * (activeLobby?.gridRows ?? 3);
+    const board = Array.from({ length: total }, (_, i) => i);
     [board[0], board[1]] = [board[1], board[0]];
     alice.puzzle!.board = board;
     await lobbyRepo.put(activeLobby!);
@@ -194,9 +195,10 @@ describe("Session Lifecycle, Reset, Vercel-Safe SSE, and Isolation", () => {
 
     // 2. Host starts game (emits GAME_STARTED, MEMORY_PHASE_STARTED, etc.)
     await gameService.startGame(lobby.code, lobby.hostToken);
+    await clearTimers(lobby.code);
 
-    // Wait 300ms for non-blocking persistence to write to database
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait 500ms for non-blocking persistence to write to database
+    await new Promise((r) => setTimeout(r, 500));
 
     // 3. Query events after initialCursor
     const events = await getEventsAfter(lobby.code, initialCursor, player.id);

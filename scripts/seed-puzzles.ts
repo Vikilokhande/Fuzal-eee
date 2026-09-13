@@ -20,11 +20,11 @@ const supabase = createClient(supabaseUrl, serviceRoleKey, {
 });
 
 const BUCKET_NAME = "puzzle-images";
-const TARGET_SIZE = 800;
-const GRID_ROWS = 4;
-const GRID_COLS = 4;
-const TILE_WIDTH = TARGET_SIZE / GRID_COLS; // 200
-const TILE_HEIGHT = TARGET_SIZE / GRID_ROWS; // 200
+const TARGET_SIZE = 900;
+const GRID_ROWS = 3;
+const GRID_COLS = 3;
+const TILE_WIDTH = TARGET_SIZE / GRID_COLS; // 300
+const TILE_HEIGHT = TARGET_SIZE / GRID_ROWS; // 300
 
 interface PuzzleDef {
   file: string;
@@ -89,7 +89,7 @@ async function seedPuzzles() {
     }
     console.log(`  ✓ Uploaded original: ${originalPath}`);
 
-    // 3. Slice into 16 tiles (4x4)
+    // 3. Slice into 9 tiles (3x3)
     const masterSharp = sharp(masterWebPBuffer);
     for (let pieceId = 0; pieceId < GRID_ROWS * GRID_COLS; pieceId++) {
       const col = pieceId % GRID_COLS;
@@ -117,7 +117,7 @@ async function seedPuzzles() {
         console.error(`  ✗ Failed to upload tile ${piecePath}:`, tileUploadErr.message);
       }
     }
-    console.log(`  ✓ Uploaded all 16 pre-generated WebP tiles for ${puzzle.slug}`);
+    console.log(`  ✓ Uploaded all 9 pre-generated WebP tiles for ${puzzle.slug}`);
 
     // 4. Upsert row into puzzle_images table
     const { data: existingRows } = await supabase

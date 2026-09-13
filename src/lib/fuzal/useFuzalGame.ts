@@ -405,13 +405,13 @@ export function useFuzalGame(opts: UseOpts) {
         return;
       }
 
-      const totalPieces = (state?.gridCols ?? 4) * (state?.gridRows ?? 4);
+      const totalPieces = (state?.gridCols ?? 3) * (state?.gridRows ?? 3);
       let isNowSolved = false;
 
       // Step 1: Update the board state
       // Step 2: Recalculate which positions are correct
-      // Step 3: Check ALL 16 positions against the canonical solved mapping
-      // Step 4: If all 16 are correct, mark the puzzle SOLVED exactly once
+      // Step 3: Check ALL positions against the canonical solved mapping
+      // Step 4: If all positions are correct, mark the puzzle SOLVED exactly once
       setState((prev) => {
         if (!prev?.puzzle || prev.puzzle.completed) return prev;
         const nextBoard = swapPieces(prev.puzzle.board, from, to);
@@ -496,7 +496,7 @@ export function useFuzalGame(opts: UseOpts) {
     ) {
       return;
     }
-    const total = (state.gridCols ?? 4) * (state.gridRows ?? 4);
+    const total = (state.gridCols ?? 3) * (state.gridRows ?? 3);
 
     // If already loaded for this round, do nothing
     if (Object.keys(pieceSrcs).length >= total) {

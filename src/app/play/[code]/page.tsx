@@ -68,7 +68,7 @@ export default function PlayerGamePage() {
   } = game;
 
   const totalPieces = useMemo(
-    () => (state ? state.gridCols * state.gridRows : 16),
+    () => (state ? state.gridCols * state.gridRows : 9),
     [state],
   );
 

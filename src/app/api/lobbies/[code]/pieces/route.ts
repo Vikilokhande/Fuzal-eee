@@ -95,7 +95,8 @@ export async function GET(
     // Fallback: If not in embedded bundle, fetch from Supabase Storage
     if (!pieces) {
       pieces = {};
-      const fetches = Array.from({ length: 16 }, async (_, pieceId) => {
+      const total = (localLobby?.gridCols ?? 3) * (localLobby?.gridRows ?? 3);
+      const fetches = Array.from({ length: total }, async (_, pieceId) => {
         const pieceNumStr = String(pieceId).padStart(2, "0");
         const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
         const { data: fileData } = await supabaseAdmin.storage
