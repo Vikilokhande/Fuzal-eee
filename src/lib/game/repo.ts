@@ -29,9 +29,69 @@ export interface LobbyRepository {
   size(): Promise<number>;
 }
 
+/** Detects transient network / gateway errors (504 Gateway Timeout, 502, 503, connection drops) */
+export function isTransientDbError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message || err?.details || "").toLowerCase();
+  const code = String(err?.code || "").toLowerCase();
+  return (
+    msg.includes("gateway timeout") ||
+    msg.includes("bad gateway") ||
+    msg.includes("service unavailable") ||
+    msg.includes("fetch failed") ||
+    msg.includes("timeout") ||
+    msg.includes("504") ||
+    msg.includes("502") ||
+    msg.includes("503") ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("und_err_connect_timeout") ||
+    code === "504" ||
+    code === "502" ||
+    code === "503"
+  );
+}
+
+/** Retries transient database operations with exponential backoff */
+export async function withDbRetry<T = any>(
+  opName: string,
+  fn: () => PromiseLike<{ data: T | null; error: any }>,
+  maxRetries = 3,
+  baseDelayMs = 200,
+): Promise<{ data: T | null; error: any }> {
+  let res: { data: T | null; error: any } = { data: null, error: null };
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      res = (await fn()) as { data: T; error: any };
+      if (!res.error) return res;
+
+      if (!isTransientDbError(res.error) || attempt === maxRetries) {
+        return res;
+      }
+
+      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.random() * 50;
+      console.warn(
+        `[REPO_RETRY] ${opName} hit transient error "${res.error.message}". Retrying (${attempt}/${maxRetries}) in ${Math.round(delay)}ms...`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    } catch (thrown: any) {
+      if (!isTransientDbError(thrown) || attempt === maxRetries) {
+        return { data: null as any, error: thrown };
+      }
+      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.random() * 50;
+      console.warn(
+        `[REPO_RETRY] ${opName} threw transient exception "${thrown?.message}". Retrying (${attempt}/${maxRetries}) in ${Math.round(delay)}ms...`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  return res;
+}
+
 export class SupabaseLobbyRepository implements LobbyRepository {
   // In-process runtime handle cache (retains Node.js timers and promise mutexes)
   private processLobbies = new Map<string, Lobby>();
+  private lobbyDbIds = new Map<string, string>();
 
   async put(lobby: Lobby): Promise<Lobby> {
     const code = lobby.code.toUpperCase();
@@ -49,24 +109,38 @@ export class SupabaseLobbyRepository implements LobbyRepository {
     }
 
     try {
-      // 1. Upsert lobby row
-      const { data: lobbyRow, error: lobbyErr } = await supabaseAdmin
-        .from("lobbies")
-        .upsert(
-          {
-            code,
-            host_token_hash: lobby.hostToken,
-            status: lobby.status,
-            max_players: lobby.maxPlayers,
-            current_game_id: lobby.currentGameId ?? null,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "code" },
-        )
-        .select("id")
-        .single();
+      // 1. Upsert lobby row with retry
+      const { data: lobbyRow, error: lobbyErr } = await withDbRetry<any>(
+        `upsert_lobby(${code})`,
+        () =>
+          supabaseAdmin
+            .from("lobbies")
+            .upsert(
+              {
+                code,
+                host_token_hash: lobby.hostToken,
+                status: lobby.status,
+                max_players: lobby.maxPlayers,
+                current_game_id: lobby.currentGameId ?? null,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: "code" },
+            )
+            .select("id")
+            .single(),
+      );
 
       if (lobbyErr) {
+        if (isTransientDbError(lobbyErr)) {
+          console.warn(`[REPO_TRANSIENT_WARN] Supabase gateway timeout during put(${code}):`, {
+            message: lobbyErr.message,
+            operation: "upsert_lobby",
+            lobbyCode: code,
+          });
+          // In-memory lobby is already cached in this.processLobbies — don't crash
+          return lobby;
+        }
+
         console.error(`[REPO_ERROR] Failed to upsert lobby ${code}:`, {
           name: lobbyErr.name,
           message: lobbyErr.message,
@@ -83,10 +157,13 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         );
       }
 
-      const lobbyDbId = lobbyRow.id;
+      if (lobbyRow?.id) {
+        this.lobbyDbIds.set(code, lobbyRow.id);
+      }
+      const lobbyDbId = lobbyRow?.id ?? this.lobbyDbIds.get(code);
 
       // 2. Batch sync players (1 query instead of sequential loop)
-      if (lobby.players.length > 0) {
+      if (lobby.players.length > 0 && lobbyDbId) {
         const playerRows = lobby.players.map((p) => ({
           id: p.id,
           lobby_id: lobbyDbId,
@@ -98,36 +175,39 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           active: true,
           last_seen_at: new Date().toISOString(),
         }));
-        const { error: pErr } = await supabaseAdmin
-          .from("players")
-          .upsert(playerRows, { onConflict: "id" });
+        const { error: pErr } = await withDbRetry<any>(
+          `batch_upsert_players(${code})`,
+          () => supabaseAdmin.from("players").upsert(playerRows, { onConflict: "id" }),
+        );
         if (pErr) {
-          console.error(`[REPO_ERROR] Failed to batch upsert players:`, pErr.message);
+          console.warn(`[REPO_WARN] Failed to batch upsert players:`, pErr.message);
         }
       }
 
       // 3. Sync current game & player boards in parallel
       if (lobby.currentGameId) {
         const gameStatus = lobby.status === GameState.LOBBY ? GameState.FINISHED : lobby.status;
-        const gamePromise = supabaseAdmin
-          .from("games")
-          .update({
-            state: gameStatus,
-            memory_started_at: lobby.memory?.startedAt
-              ? new Date(lobby.memory.startedAt).toISOString()
-              : null,
-            memory_ends_at: lobby.memory?.endsAt
-              ? new Date(lobby.memory.endsAt).toISOString()
-              : null,
-            puzzle_started_at: lobby.puzzleStartedAt
-              ? new Date(lobby.puzzleStartedAt).toISOString()
-              : null,
-            finished_at: lobby.finishedAt
-              ? new Date(lobby.finishedAt).toISOString()
-              : null,
-            winner_player_id: lobby.winnerId ?? null,
-          })
-          .eq("id", lobby.currentGameId);
+        const gamePromise = withDbRetry<any>(`update_game(${lobby.currentGameId})`, () =>
+          supabaseAdmin
+            .from("games")
+            .update({
+              state: gameStatus,
+              memory_started_at: lobby.memory?.startedAt
+                ? new Date(lobby.memory.startedAt).toISOString()
+                : null,
+              memory_ends_at: lobby.memory?.endsAt
+                ? new Date(lobby.memory.endsAt).toISOString()
+                : null,
+              puzzle_started_at: lobby.puzzleStartedAt
+                ? new Date(lobby.puzzleStartedAt).toISOString()
+                : null,
+              finished_at: lobby.finishedAt
+                ? new Date(lobby.finishedAt).toISOString()
+                : null,
+              winner_player_id: lobby.winnerId ?? null,
+            })
+            .eq("id", lobby.currentGameId!),
+        );
 
         const gpRows = lobby.players
           .filter((p) => p.puzzle)
@@ -146,21 +226,27 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
         const gpPromise =
           gpRows.length > 0
-            ? supabaseAdmin
-                .from("game_players")
-                .upsert(gpRows, { onConflict: "game_id,player_id" })
-            : Promise.resolve({ error: null });
+            ? withDbRetry<any>(`batch_upsert_game_players(${lobby.currentGameId})`, () =>
+                supabaseAdmin
+                  .from("game_players")
+                  .upsert(gpRows, { onConflict: "game_id,player_id" }),
+              )
+            : Promise.resolve({ data: null, error: null });
 
         const [gameRes, gpRes] = await Promise.all([gamePromise, gpPromise]);
         if (gameRes.error) {
-          console.error(`[REPO_ERROR] Failed to update game ${lobby.currentGameId}:`, gameRes.error.message);
+          console.warn(`[REPO_WARN] Failed to update game ${lobby.currentGameId}:`, gameRes.error.message);
         }
         if (gpRes.error) {
-          console.error(`[REPO_ERROR] Failed to batch upsert game_players:`, gpRes.error.message);
+          console.warn(`[REPO_WARN] Failed to batch upsert game_players:`, gpRes.error.message);
         }
       }
     } catch (err: any) {
       if (err instanceof GameError) throw err;
+      if (isTransientDbError(err)) {
+        console.warn(`[REPO_TRANSIENT_WARN] Transient exception during put(${code}), proceeding with in-memory state:`, err?.message);
+        return lobby;
+      }
       console.error(`[REPO_ERROR] Unexpected error in put(${code}):`, {
         name: err?.name,
         message: err?.message,
@@ -184,16 +270,20 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
     if (!isSupabaseConfigured()) {
       console.error(`[REPO_CONFIG_ERROR] Cannot get lobby ${normCode}: Supabase credentials not configured.`);
-      return null;
+      return this.processLobbies.get(normCode) ?? null;
     }
 
     try {
-      // 1. Fetch lobby from Supabase
-      const { data: lobbyRow, error: lobbyErr } = await supabaseAdmin
-        .from("lobbies")
-        .select("*")
-        .eq("code", normCode)
-        .maybeSingle();
+      // 1. Fetch lobby from Supabase with retry
+      const { data: lobbyRow, error: lobbyErr } = await withDbRetry<any>(
+        `getByCode_lobby(${normCode})`,
+        () =>
+          supabaseAdmin
+            .from("lobbies")
+            .select("*")
+            .eq("code", normCode)
+            .maybeSingle(),
+      );
 
       if (lobbyErr) {
         console.error(`[REPO_ERROR] Failed to fetch lobby ${normCode}:`, {
@@ -205,33 +295,46 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           operation: "getByCode_lobby",
           lobbyCode: normCode,
         });
+        const cached = this.processLobbies.get(normCode);
+        if (cached) {
+          console.warn(`[REPO_FALLBACK] Serving in-memory lobby for ${normCode} after Supabase error.`);
+          return cached;
+        }
         return null;
       }
       if (!lobbyRow) {
-        return null;
+        return this.processLobbies.get(normCode) ?? null;
       }
 
-      // 2 & 3. Parallel fetch: active players, current game, and game_players
+      this.lobbyDbIds.set(normCode, lobbyRow.id);
+
+      // 2 & 3. Parallel fetch: active players, current game, and game_players with retry
       const [playersRes, gameRes, gpRes] = await Promise.all([
-        supabaseAdmin
-          .from("players")
-          .select("*")
-          .eq("lobby_id", lobbyRow.id)
-          .eq("active", true)
-          .order("slot", { ascending: true }),
+        withDbRetry<any[]>(`get_players(${normCode})`, () =>
+          supabaseAdmin
+            .from("players")
+            .select("*")
+            .eq("lobby_id", lobbyRow.id)
+            .eq("active", true)
+            .order("slot", { ascending: true }),
+        ),
         lobbyRow.current_game_id
-          ? supabaseAdmin
-              .from("games")
-              .select("*, puzzle_images(*)")
-              .eq("id", lobbyRow.current_game_id)
-              .maybeSingle()
-          : Promise.resolve({ data: null }),
+          ? withDbRetry<any>(`get_game(${lobbyRow.current_game_id})`, () =>
+              supabaseAdmin
+                .from("games")
+                .select("*, puzzle_images(*)")
+                .eq("id", lobbyRow.current_game_id)
+                .maybeSingle(),
+            )
+          : Promise.resolve({ data: null, error: null }),
         lobbyRow.current_game_id
-          ? supabaseAdmin
-              .from("game_players")
-              .select("*")
-              .eq("game_id", lobbyRow.current_game_id)
-          : Promise.resolve({ data: [] }),
+          ? withDbRetry<any[]>(`get_game_players(${lobbyRow.current_game_id})`, () =>
+              supabaseAdmin
+                .from("game_players")
+                .select("*")
+                .eq("game_id", lobbyRow.current_game_id),
+            )
+          : Promise.resolve({ data: [], error: null }),
       ]);
 
       const playerRows = playersRes.data ?? [];
@@ -376,15 +479,18 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         operation: "getByCode_lobby",
         lobbyCode: normCode,
       });
-      return null;
+      return this.processLobbies.get(normCode) ?? null;
     }
   }
 
   async deleteByCode(code: string): Promise<void> {
     const normCode = code.toUpperCase();
     this.processLobbies.delete(normCode);
+    this.lobbyDbIds.delete(normCode);
     try {
-      await supabaseAdmin.from("lobbies").delete().eq("code", normCode);
+      await withDbRetry(`delete_lobby(${normCode})`, () =>
+        supabaseAdmin.from("lobbies").delete().eq("code", normCode),
+      );
     } catch (err) {
       console.error(`[REPO_ERROR] Failed to delete lobby ${normCode}:`, err);
     }

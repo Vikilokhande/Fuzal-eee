@@ -14,7 +14,7 @@ import { config } from "./config";
 import { makePlayerId, makeToken, makeGameCode } from "./codes";
 import { imageService, SOURCE_VIEWBOX } from "./imageService";
 import { manager } from "./manager";
-import { findPlayer, lobbyRepo, withLobbyLock } from "./repo";
+import { findPlayer, lobbyRepo, withLobbyLock, withDbRetry } from "./repo";
 import {
   correctSlots,
   generateShuffledBoard,
@@ -183,12 +183,16 @@ export const lobbyService = {
       const playerToken = makeToken();
 
       // Database-level atomic join: locks lobby row, enforces max 5 players, assigns slot 1..5
-      const { data: joinRes, error: rpcErr } = await supabaseAdmin.rpc("join_lobby_atomic", {
-        p_code: code.toUpperCase(),
-        p_player_id: playerId,
-        p_name: name.trim(),
-        p_token_hash: playerToken,
-      });
+      const { data: joinRes, error: rpcErr } = await withDbRetry(
+        `join_lobby_atomic(${code})`,
+        () =>
+          supabaseAdmin.rpc("join_lobby_atomic", {
+            p_code: code.toUpperCase(),
+            p_player_id: playerId,
+            p_name: name.trim(),
+            p_token_hash: playerToken,
+          }),
+      );
 
       if (rpcErr) {
         console.error("[JOIN_RPC_ERROR]", rpcErr.message);
@@ -856,10 +860,14 @@ export const gameService = {
 
     // Database-level atomic winner claiming (single-winner guarantee across instances)
     if (lobby.currentGameId) {
-      const { data: claimed, error: claimErr } = await supabaseAdmin.rpc("claim_game_winner", {
-        p_game_id: lobby.currentGameId,
-        p_player_id: winner.id,
-      });
+      const { data: claimed, error: claimErr } = await withDbRetry(
+        `claim_game_winner(${lobby.currentGameId})`,
+        () =>
+          supabaseAdmin.rpc("claim_game_winner", {
+            p_game_id: lobby.currentGameId,
+            p_player_id: winner.id,
+          }),
+      );
 
       if (claimErr) {
         console.error("[CLAIM_WINNER_ERROR]", claimErr.message);
