@@ -18,7 +18,7 @@ const spaceGrotesk = Space_Grotesk({
 export const metadata: Metadata = {
   title: "Fuzal — Real-Time Multiplayer Puzzle Arena",
   description:
-    "Scan. Memorize. Solve. A real-time multiplayer image puzzle for events — up to 5 players on their phones, one big screen hosting the game.",
+    "Scan. Memorize. Solve. A real-time multiplayer image puzzle arena for live events — players compete on their phones while a big screen hosts the match.",
   manifest: "/manifest.webmanifest",
 };
 

@@ -63,6 +63,19 @@ export class ImageService {
     return this.images.find((i) => i.id === id);
   }
 
+  getBySlug(slug: string): ImageMeta | undefined {
+    return this.images.find((i) => i.slug === slug);
+  }
+
+  registerDynamicImage(meta: ImageMeta) {
+    const existing = this.images.findIndex((x) => x.id === meta.id || x.slug === meta.slug);
+    if (existing >= 0) {
+      this.images[existing] = meta;
+    } else {
+      this.images.push(meta);
+    }
+  }
+
   /** Pick a random image, optionally avoiding recently used ids. */
   getRandomImage(excludeIds: string[] = []): ImageMeta {
     const pool =

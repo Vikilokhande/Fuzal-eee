@@ -310,7 +310,10 @@ export const lobbyService = {
     gridSize?: number;
     gridCols?: number;
     gridRows?: number;
+    maxPlayers?: number;
     memorySeconds?: number;
+    puzzleSeconds?: number;
+    imageId?: string;
   }): Promise<Lobby> {
     const code = makeGameCode(4);
 
@@ -339,13 +342,18 @@ export const lobbyService = {
     const gridRows = n;
     const pieceCount = n * n;
 
+    const maxPlayers =
+      opts?.maxPlayers && opts.maxPlayers >= 1 && opts.maxPlayers <= 100
+        ? opts.maxPlayers
+        : config.maxPlayers;
+
     const lobby: Lobby = {
       id: `FZ-${code}`,
       code,
       hostToken: makeToken(),
       status: GameState.LOBBY,
       players: [],
-      maxPlayers: config.maxPlayers,
+      maxPlayers,
       gridCols,
       gridRows,
       pieceCount,

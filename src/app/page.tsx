@@ -2,17 +2,22 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import Link from "next/link";
 import { Wordmark, Logo } from "@/components/Brand";
 import { createLobby, sessionStore } from "@/lib/fuzal/api";
+import { GAME_CONFIG } from "@/lib/game/config";
 import { GameShell } from "@/components/game/GameShell";
 import { GridSelector } from "@/components/game/GridSelector";
 import { GameBadge } from "@/components/game/GameBadge";
+
+const CAPACITY_PRESETS = [4, 8, 16, 32, 50, 100];
 
 export default function GameSetupPage() {
   const router = useRouter();
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [gridSize, setGridSize] = useState<number>(3);
+  const [maxPlayers, setMaxPlayers] = useState<number>(GAME_CONFIG.defaultCapacity ?? 8);
 
   const pieceCount = gridSize * gridSize;
 
@@ -20,7 +25,7 @@ export default function GameSetupPage() {
     setCreating(true);
     setError(null);
     try {
-      const lobby = await createLobby({ gridSize });
+      const lobby = await createLobby({ gridSize, maxPlayers });
       sessionStore.set(`host:${lobby.code}`, {
         token: lobby.hostToken,
         createdAt: Date.now(),
@@ -42,12 +47,15 @@ export default function GameSetupPage() {
           </div>
           <Wordmark size={56} />
 
-          <div className="mt-1 flex items-center gap-2">
+          <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
             <GameBadge variant="ready" pulse>
               MULTIPLAYER ARENA
             </GameBadge>
             <GameBadge variant="grid">
               {gridSize}×{gridSize} • {pieceCount} PIECES
+            </GameBadge>
+            <GameBadge variant="neutral">
+              1–{maxPlayers} PLAYERS
             </GameBadge>
           </div>
 
@@ -68,7 +76,61 @@ export default function GameSetupPage() {
           />
         </div>
 
-        {/* Primary CTA: Dynamic with gridSize */}
+        {/* Configurable Player Capacity */}
+        <div className="flex flex-col items-center gap-3 w-full max-w-md glass p-5 border border-white/10 rounded-2xl">
+          <div className="flex items-center justify-between w-full">
+            <span className="text-xs font-bold uppercase tracking-wider text-indigo-200/70">
+              Lobby Player Capacity
+            </span>
+            <span className="font-mono text-sm font-black text-cyan-300">
+              {maxPlayers} Players Max
+            </span>
+          </div>
+
+          {/* Stepper + Presets */}
+          <div className="flex items-center justify-center gap-4 w-full">
+            <button
+              type="button"
+              disabled={creating || maxPlayers <= 1}
+              onClick={() => setMaxPlayers((m) => Math.max(1, m - 1))}
+              className="h-10 w-10 rounded-xl bg-slate-900/80 border border-white/10 hover:border-cyan-400 text-white font-black text-lg disabled:opacity-30 transition-colors"
+            >
+              −
+            </button>
+            <span className="font-display text-3xl font-black text-white w-20 text-center tabular-nums">
+              {maxPlayers}
+            </span>
+            <button
+              type="button"
+              disabled={creating || maxPlayers >= 100}
+              onClick={() => setMaxPlayers((m) => Math.min(100, m + 1))}
+              className="h-10 w-10 rounded-xl bg-slate-900/80 border border-white/10 hover:border-cyan-400 text-white font-black text-lg disabled:opacity-30 transition-colors"
+            >
+              +
+            </button>
+          </div>
+
+          {/* Quick Preset Buttons */}
+          <div className="flex flex-wrap items-center justify-center gap-1.5 w-full pt-1">
+            {CAPACITY_PRESETS.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                disabled={creating}
+                onClick={() => setMaxPlayers(preset)}
+                className={`px-3 py-1 text-xs font-mono font-bold rounded-lg border transition-all ${
+                  maxPlayers === preset
+                    ? "border-cyan-400 bg-cyan-500/25 text-white shadow-[0_0_10px_rgba(34,211,238,0.3)]"
+                    : "border-white/10 bg-slate-900/50 text-indigo-200/60 hover:text-white"
+                }`}
+              >
+                {preset}P
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Primary CTA: Dynamic with gridSize and maxPlayers */}
         <div className="flex flex-col items-center gap-3 w-full max-w-md">
           <button
             type="button"
@@ -104,7 +166,7 @@ export default function GameSetupPage() {
               1 · Scan to Join
             </p>
             <p className="mt-1 text-xs sm:text-sm text-indigo-200/70">
-              Up to 5 players scan the lobby QR with their phone to enter the arena instantly.
+              Up to {maxPlayers} players scan the lobby QR with their phone to enter the arena instantly.
             </p>
           </div>
 
@@ -129,9 +191,18 @@ export default function GameSetupPage() {
           </div>
         </div>
 
-        <p className="text-[11px] uppercase tracking-[0.3em] text-indigo-200/40">
-          Host Arena View · Optimized for Big Screen TV &amp; Projectors
-        </p>
+        <div className="flex items-center justify-between w-full max-w-md pt-2">
+          <Link
+            href="/host"
+            className="text-xs font-mono font-bold text-cyan-400 hover:text-cyan-300 flex items-center gap-1.5 transition-colors"
+          >
+            <span>🎛️</span>
+            <span>Host Control Room &amp; Analytics</span>
+          </Link>
+          <span className="text-[11px] uppercase tracking-[0.2em] text-indigo-200/40">
+            TV &amp; Projector Ready
+          </span>
+        </div>
       </div>
     </GameShell>
   );

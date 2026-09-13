@@ -151,7 +151,7 @@ export default function JoinArenaPage() {
               Arena Full
             </h2>
             <p className="text-xs sm:text-sm text-indigo-200/70">
-              This game already has maximum <strong>5 players</strong>.
+              This game already has reached its capacity of <strong>{lobby?.maxPlayers ?? 8} players</strong>.
               Wait for the next round to begin.
             </p>
             {existingSession && (
@@ -274,7 +274,7 @@ export default function JoinArenaPage() {
             </form>
 
             <p className="text-[11px] font-semibold text-indigo-200/50 uppercase tracking-wider">
-              Live Event Match • Up to 5 players
+              Live Event Match • Up to {lobby.maxPlayers} players
             </p>
 
             {existingSession && (

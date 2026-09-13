@@ -33,7 +33,9 @@ export function PlayerRosterCard({
     prevCount.current = players.length;
   }, [players]);
 
-  const slots = Array.from({ length: maxPlayers }, (_, i) => players[i] ?? null);
+  const openSlotsCount = Math.max(0, maxPlayers - players.length);
+  // If maxPlayers > 8, display all joined players + max 2 empty placeholders to keep UI compact
+  const emptyPlaceholdersToShow = maxPlayers <= 8 ? openSlotsCount : Math.min(openSlotsCount, 2);
 
   return (
     <div className="flex w-full max-w-md flex-col gap-4">
@@ -80,57 +82,63 @@ export function PlayerRosterCard({
 
       {/* Slots List */}
       <div className="flex flex-col gap-2.5 w-full">
-        {slots.map((player, i) => (
+        {players.map((player, i) => (
           <div
-            key={player?.id ?? `slot-${i}`}
-            className={`flex items-center gap-3.5 rounded-2xl border px-4 py-3 transition-all duration-300 ${
-              player
-                ? "border-cyan-400/30 bg-slate-900/60 shadow-[0_4px_20px_rgba(0,0,0,0.3)]"
-                : "border-dashed border-white/10 bg-white/[0.02]"
-            }`}
+            key={player.id}
+            className="flex items-center gap-3.5 rounded-2xl border px-4 py-3 border-cyan-400/30 bg-slate-900/60 shadow-[0_4px_20px_rgba(0,0,0,0.3)] transition-all duration-300"
           >
-            {player ? (
-              <>
-                <Avatar name={player.name} slot={player.slot} connected={player.connected} size="md" />
-                <div className="min-w-0 flex-1 text-left">
-                  <p className="truncate text-base sm:text-lg font-bold text-white">
-                    {player.name}
-                  </p>
-                  <p className="text-xs text-indigo-200/70 flex items-center gap-1.5">
-                    {player.connected ? (
-                      <>
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" />
-                        <span className="text-emerald-300 font-semibold">Ready in Arena</span>
-                      </>
-                    ) : (
-                      <>
-                        <span className="h-1.5 w-1.5 rounded-full bg-rose-500 inline-block" />
-                        <span className="text-rose-400 font-semibold">Disconnected</span>
-                      </>
-                    )}
-                  </p>
-                </div>
-                <span className="rounded-lg bg-white/5 px-2 py-1 font-mono text-xs font-bold text-cyan-300/80">
-                  SLOT {i + 1}
-                </span>
-              </>
-            ) : (
-              <>
-                <div className="grid h-10 w-10 place-items-center rounded-full border border-dashed border-white/20 text-xs font-bold text-white/30">
-                  {i + 1}
-                </div>
-                <div className="flex-1 text-left">
-                  <p className="text-sm sm:text-base font-medium text-white/30 italic">
-                    Waiting for player…
-                  </p>
-                </div>
-                <span className="text-[11px] font-medium text-white/20 uppercase tracking-widest">
-                  OPEN
-                </span>
-              </>
-            )}
+            <Avatar name={player.name} slot={player.slot} connected={player.connected} size="md" />
+            <div className="min-w-0 flex-1 text-left">
+              <p className="truncate text-base sm:text-lg font-bold text-white">
+                {player.name}
+              </p>
+              <p className="text-xs text-indigo-200/70 flex items-center gap-1.5">
+                {player.connected ? (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" />
+                    <span className="text-emerald-300 font-semibold">Ready in Arena</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-rose-500 inline-block" />
+                    <span className="text-rose-400 font-semibold">Disconnected</span>
+                  </>
+                )}
+              </p>
+            </div>
+            <span className="rounded-lg bg-white/5 px-2 py-1 font-mono text-xs font-bold text-cyan-300/80">
+              SLOT {player.slot || i + 1}
+            </span>
           </div>
         ))}
+
+        {Array.from({ length: emptyPlaceholdersToShow }).map((_, idx) => {
+          const slotNum = players.length + idx + 1;
+          return (
+            <div
+              key={`empty-${slotNum}`}
+              className="flex items-center gap-3.5 rounded-2xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-3 transition-all duration-300"
+            >
+              <div className="grid h-10 w-10 place-items-center rounded-full border border-dashed border-white/20 text-xs font-bold text-white/30">
+                {slotNum}
+              </div>
+              <div className="flex-1 text-left">
+                <p className="text-sm sm:text-base font-medium text-white/30 italic">
+                  Waiting for player…
+                </p>
+              </div>
+              <span className="text-[11px] font-medium text-white/20 uppercase tracking-widest">
+                OPEN
+              </span>
+            </div>
+          );
+        })}
+
+        {openSlotsCount > emptyPlaceholdersToShow && (
+          <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.01] px-4 py-2 text-center text-xs font-mono text-indigo-200/50">
+            +{openSlotsCount - emptyPlaceholdersToShow} more open slots available (up to {maxPlayers} players)
+          </div>
+        )}
       </div>
 
       {/* Primary Action Button */}

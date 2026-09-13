@@ -39,12 +39,72 @@ async function parseError(res: Response): Promise<ApiError> {
   }
 }
 
-export async function createLobby(opts?: { gridSize?: number }): Promise<CreatedLobby> {
+export async function createLobby(opts?: {
+  gridSize?: number;
+  maxPlayers?: number;
+  memorySeconds?: number;
+  puzzleSeconds?: number;
+}): Promise<CreatedLobby> {
   const res = await fetch("/api/lobbies", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts ?? {}),
   });
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+}
+
+export async function getHostOverview() {
+  const res = await fetch("/api/host/overview", { cache: "no-store" });
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+}
+
+export async function getHostHistory(params?: {
+  page?: number;
+  limit?: number;
+  grid?: number;
+  status?: string;
+  search?: string;
+  date?: string;
+}) {
+  const q = new URLSearchParams();
+  if (params?.page) q.set("page", String(params.page));
+  if (params?.limit) q.set("limit", String(params.limit));
+  if (params?.grid) q.set("grid", String(params.grid));
+  if (params?.status) q.set("status", params.status);
+  if (params?.search) q.set("search", params.search);
+  if (params?.date) q.set("date", params.date);
+
+  const res = await fetch(`/api/host/history?${q.toString()}`, { cache: "no-store" });
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+}
+
+export async function getGameDetail(gameId: string) {
+  const res = await fetch(`/api/host/history/${gameId}`, { cache: "no-store" });
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+}
+
+export async function getHostPuzzles() {
+  const res = await fetch("/api/host/puzzles", { cache: "no-store" });
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+}
+
+export async function uploadPuzzleImage(formData: FormData) {
+  const res = await fetch("/api/host/puzzles/images", {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+}
+
+export async function getHostPlayers(search?: string) {
+  const q = search ? `?search=${encodeURIComponent(search)}` : "";
+  const res = await fetch(`/api/host/players${q}`, { cache: "no-store" });
   if (!res.ok) throw await parseError(res);
   return res.json();
 }

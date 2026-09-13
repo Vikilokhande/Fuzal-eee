@@ -161,7 +161,10 @@ export const createLobbySchema = z
     gridSize: z.number().int().min(2).max(8).optional(),
     gridCols: z.number().int().min(2).max(8).optional(),
     gridRows: z.number().int().min(2).max(8).optional(),
+    maxPlayers: z.number().int().min(1).max(100).optional(),
     memorySeconds: z.number().int().min(5).max(120).optional(),
+    puzzleSeconds: z.number().int().min(10).max(600).optional(),
+    imageId: z.string().optional(),
   })
   .refine(
     (data) => {
@@ -183,6 +186,88 @@ export const createLobbySchema = z
       message: "Only square grids (2x2 through 8x8) are supported for new games.",
     },
   );
+
+export interface GameHistoryItem {
+  id: string;
+  lobbyCode: string;
+  date: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  durationFormatted: string;
+  puzzleName: string;
+  puzzleSlug?: string;
+  gridSize: number;
+  gridDisplay: string;
+  pieceCount: number;
+  playerCount: number;
+  winnerName: string | null;
+  winnerMoves: number | null;
+  winnerDurationFormatted: string | null;
+  status: string;
+}
+
+export interface HistoricalPlayerParticipation {
+  id: string;
+  name: string;
+  slot: number;
+  score: number;
+  moves: number;
+  correctSlots: number;
+  completed: boolean;
+  durationMs: number | null;
+  durationFormatted: string;
+  finalStatus: "SOLVED" | "ELIMINATED" | "DID_NOT_FINISH";
+}
+
+export interface GameHistoryDetail {
+  id: string;
+  lobbyCode: string;
+  status: string;
+  gridSize: number;
+  gridDisplay: string;
+  pieceCount: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationFormatted: string;
+  puzzle: {
+    id: string;
+    name: string;
+    url?: string;
+  };
+  winner: {
+    name: string;
+    moves: number | null;
+    durationFormatted: string | null;
+  } | null;
+  standings: HistoricalPlayerParticipation[];
+  players: HistoricalPlayerParticipation[];
+}
+
+export interface HostAnalyticsOverview {
+  totalGames: number;
+  totalPlayers: number;
+  totalCompletions: number;
+  activeLobbies: number;
+  avgSolveTimeMs: number | null;
+  avgSolveTimeFormatted: string;
+  bestSolveTimeMs: number | null;
+  bestSolveTimeFormatted: string;
+  recentGames: GameHistoryItem[];
+}
+
+export interface PuzzleImageDef {
+  id: string;
+  name: string;
+  slug: string;
+  url: string;
+  width: number;
+  height: number;
+  supportedGrids: number[];
+  active: boolean;
+  createdAt: string;
+  usageCount: number;
+}
 
 export const joinSchema = z.object({
   name: z
