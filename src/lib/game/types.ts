@@ -84,6 +84,7 @@ export interface Lobby {
   maxPlayers: number;
   gridCols: number;
   gridRows: number;
+  pieceCount?: number;
   currentGameId?: string | null;
   memory: MemoryPhase | null;
   puzzleStartedAt: number | null;
@@ -133,6 +134,7 @@ export interface GameEvent<T = unknown> {
   at: number;
   eventId?: number;
   lobbyId?: string;
+  gameId?: string | null;
   payload: T;
 }
 
@@ -163,6 +165,10 @@ export const joinSchema = z.object({
 const actionBase = z.object({
   token: z.string().min(10),
 });
+const clientActionFields = {
+  actionId: z.string().trim().min(8).max(100).optional(),
+  gameId: z.string().trim().min(1).max(100).nullable().optional(),
+};
 
 export const startGameAction = actionBase.extend({
   type: z.literal("START_GAME"),
@@ -172,10 +178,12 @@ export const swapAction = actionBase.extend({
   playerId: z.string().min(3),
   from: z.number().int().min(0).max(35),
   to: z.number().int().min(0).max(35),
+  ...clientActionFields,
 });
 export const completeAction = actionBase.extend({
   type: z.literal("COMPLETE"),
   playerId: z.string().min(3),
+  ...clientActionFields,
 });
 export const playAgainAction = actionBase.extend({
   type: z.literal("PLAY_AGAIN"),

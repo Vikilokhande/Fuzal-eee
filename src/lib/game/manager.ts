@@ -27,7 +27,7 @@ export interface Subscriber {
   send: (frame: string, eventId?: number) => void;
 }
 
-/** Asynchronously records event in Supabase lobby_events without blocking response */
+/** Records an event in Supabase lobby_events and returns its authoritative cursor id. */
 async function persistEvent(
   code: string,
   event: GameEvent,
@@ -81,6 +81,7 @@ export async function getEventsAfter(
       .filter((row) => {
         if (!row.target_id) return true; // broadcast
         if (targetId?.startsWith("host:") && row.target_id === "host") return true;
+        if (targetId && !targetId.startsWith("host:") && row.target_id === "players") return true;
         if (targetId && row.target_id === targetId) return true;
         return false;
       })
@@ -115,6 +116,7 @@ export async function getLatestEventId(code: string): Promise<number> {
 
 class ConnectionManager {
   private channels = new Map<string, Set<Subscriber>>();
+  private localEventId = 0;
 
   connect(code: string, sub: Subscriber): () => void {
     let channel = this.channels.get(code);
@@ -138,27 +140,61 @@ class ConnectionManager {
   }
 
   /** Send to everyone in the lobby. */
-  broadcast(code: string, event: GameEvent, gameId?: string | null): void {
-    void persistEvent(code, event, null, gameId);
-    this.deliver(code, () => true, event);
+  async broadcast(code: string, event: GameEvent, gameId?: string | null): Promise<void> {
+    await this.persistAndDeliver(code, null, () => true, event, gameId);
   }
 
   /** Send to every phone (never the host). */
-  broadcastToPlayers(code: string, event: GameEvent, gameId?: string | null): void {
-    void persistEvent(code, event, "players", gameId);
-    this.deliver(code, (id) => !id.startsWith("host:"), event);
+  async broadcastToPlayers(code: string, event: GameEvent, gameId?: string | null): Promise<void> {
+    await this.persistAndDeliver(
+      code,
+      "players",
+      (id) => !id.startsWith("host:"),
+      event,
+      gameId,
+    );
   }
 
   /** Send to the host only. */
-  sendToHost(code: string, event: GameEvent, gameId?: string | null): void {
-    void persistEvent(code, event, "host", gameId);
-    this.deliver(code, (id) => id.startsWith("host:"), event);
+  async sendToHost(code: string, event: GameEvent, gameId?: string | null): Promise<void> {
+    await this.persistAndDeliver(
+      code,
+      "host",
+      (id) => id.startsWith("host:"),
+      event,
+      gameId,
+    );
   }
 
   /** Send to a single player. */
-  sendToPlayer(code: string, playerId: string, event: GameEvent, gameId?: string | null): void {
-    void persistEvent(code, event, playerId, gameId);
-    this.deliver(code, (id) => id === playerId, event);
+  async sendToPlayer(
+    code: string,
+    playerId: string,
+    event: GameEvent,
+    gameId?: string | null,
+  ): Promise<void> {
+    await this.persistAndDeliver(code, playerId, (id) => id === playerId, event, gameId);
+  }
+
+  private async persistAndDeliver(
+    code: string,
+    targetId: string | null,
+    match: (subscriberId: string) => boolean,
+    event: GameEvent,
+    explicitGameId?: string | null,
+  ): Promise<void> {
+    const gameId = event.gameId ?? explicitGameId ?? null;
+    const persistedId = await persistEvent(code, { ...event, gameId }, targetId, gameId);
+    const eventId =
+      persistedId ??
+      event.eventId ??
+      (!isSupabaseConfigured() ? ++this.localEventId : undefined);
+    const outbound: GameEvent = {
+      ...event,
+      gameId,
+      eventId,
+    };
+    this.deliver(code, match, outbound);
   }
 
   private deliver(

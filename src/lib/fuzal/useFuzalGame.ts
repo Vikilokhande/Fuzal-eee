@@ -3,8 +3,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FuzalSocket, type ConnectionState } from "./realtime";
 import { pieceUrl, postAction, sessionStore } from "./api";
-import { EventType, type GameEvent, type GameState } from "@/lib/game/types";
-import { swapPieces, correctSlots as computeCorrect, isSolved } from "@/lib/game/puzzle";
+import {
+  EventType,
+  GameState,
+  type GameEvent,
+  type GameState as GameStateType,
+} from "@/lib/game/types";
+import {
+  swapPieces,
+  correctSlots as computeCorrect,
+  isSolved,
+  isValidBoard,
+} from "@/lib/game/puzzle";
+import {
+  getEventGameId,
+  getPieceCount,
+  isGameState,
+  isValidPuzzleBoard,
+  shouldAcceptGameEvent,
+} from "./stateMachine";
 
 export interface PlayerView {
   id: string;
@@ -21,6 +38,7 @@ export interface ProgressView extends PlayerView {
   durationMs?: number | null;
 }
 export interface ResultView {
+  gameId?: string | null;
   winner: PlayerView | null;
   timeExpired?: boolean;
   finishedAt: number | null;
@@ -31,10 +49,12 @@ export interface ResultView {
 export interface ClientState {
   code: string;
   lobbyId: string;
-  status: GameState;
+  status: GameStateType;
   maxPlayers: number;
   gridCols: number;
   gridRows: number;
+  pieceCount: number;
+  currentGameId: string | null;
   serverNow: number;
   players: PlayerView[];
   you: { id: string; name: string; score: number } | null;
@@ -66,6 +86,177 @@ interface UseOpts {
   playerToken?: string;
 }
 
+function asPositiveInt(value: unknown, fallback: number): number {
+  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : fallback;
+}
+
+function asNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asNullableNumber(value: unknown, fallback: number | null): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function hasPlayerAuth(opts: UseOpts): boolean {
+  return Boolean(
+    opts.kind === "player" &&
+      opts.playerId &&
+      opts.playerToken &&
+      opts.playerToken.length >= 10,
+  );
+}
+
+function hasSocketAuth(opts: UseOpts): boolean {
+  if (opts.kind === "host") {
+    return Boolean(opts.hostToken && opts.hostToken.length >= 10);
+  }
+  return hasPlayerAuth(opts);
+}
+
+function makeActionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function countLoadedPieces(srcs: Record<number, string>, total: number): number {
+  let loaded = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (srcs[i]) loaded += 1;
+  }
+  return loaded;
+}
+
+function requiredPieceIds(total: number): number[] {
+  return Array.from({ length: total }, (_, pieceId) => pieceId);
+}
+
+function normalizePuzzle(
+  puzzle: unknown,
+  pieceCount: number,
+  fallbackStartedAt: number | null,
+): ClientState["puzzle"] {
+  if (!puzzle || typeof puzzle !== "object") return null;
+  const raw = puzzle as Record<string, unknown>;
+  if (!isValidPuzzleBoard(raw.board, pieceCount)) return null;
+  const board = raw.board;
+  return {
+    board,
+    moves: asNumber(raw.moves, 0),
+    startedAt: asNumber(raw.startedAt, fallbackStartedAt ?? Date.now()),
+    correctSlots:
+      Array.isArray(raw.correctSlots) && raw.correctSlots.length === pieceCount
+        ? (raw.correctSlots as boolean[])
+        : computeCorrect(board),
+    completed: Boolean(raw.completed),
+    completedAt: asNullableNumber(raw.completedAt, null) ?? undefined,
+    eliminated: Boolean(raw.eliminated),
+  };
+}
+
+function normalizeResult(result: unknown, currentGameId: string | null): ResultView | null {
+  if (!result || typeof result !== "object") return null;
+  const raw = result as ResultView;
+  return {
+    ...raw,
+    gameId: raw.gameId ?? currentGameId,
+    standings: Array.isArray(raw.standings) ? raw.standings : [],
+  };
+}
+
+function normalizeSnapshot(
+  payload: Record<string, unknown>,
+  event: GameEvent,
+  kind: "host" | "player",
+): ClientState {
+  const status = isGameState(payload.status) ? payload.status : GameState.LOBBY;
+  const gridCols = asPositiveInt(payload.gridCols, 3);
+  const gridRows = asPositiveInt(payload.gridRows, 3);
+  const pieceCount = getPieceCount(gridCols, gridRows, asPositiveInt(payload.pieceCount, 0));
+  const eventGameId = getEventGameId(event);
+  const currentGameId = asNullableString(payload.currentGameId) ?? eventGameId;
+  const puzzleStartedAt = asNullableNumber(payload.puzzleStartedAt, null);
+  const puzzle = normalizePuzzle(payload.puzzle, pieceCount, puzzleStartedAt);
+
+  return {
+    code: typeof payload.code === "string" ? payload.code : "",
+    lobbyId: typeof payload.lobbyId === "string" ? payload.lobbyId : event.lobbyId ?? "",
+    status,
+    maxPlayers: asPositiveInt(payload.maxPlayers, 5),
+    gridCols,
+    gridRows,
+    pieceCount,
+    currentGameId,
+    serverNow: asNumber(payload.serverNow, event.at ?? Date.now()),
+    players: Array.isArray(payload.players) ? (payload.players as PlayerView[]) : [],
+    you:
+      payload.you && typeof payload.you === "object"
+        ? (payload.you as ClientState["you"])
+        : null,
+    isHost:
+      typeof payload.isHost === "boolean" ? payload.isHost : kind === "host",
+    memory:
+      payload.memory && typeof payload.memory === "object"
+        ? (payload.memory as ClientState["memory"])
+        : null,
+    image:
+      payload.image && typeof payload.image === "object"
+        ? (payload.image as ClientState["image"])
+        : null,
+    imageName: asNullableString(payload.imageName),
+    puzzle,
+    puzzleStartedAt: puzzleStartedAt ?? puzzle?.startedAt ?? null,
+    puzzleEndsAt: asNullableNumber(payload.puzzleEndsAt, null),
+    puzzleDurationSeconds: asNullableNumber(payload.puzzleDurationSeconds, null),
+    puzzleProgress: Array.isArray(payload.puzzleProgress)
+      ? (payload.puzzleProgress as ProgressView[])
+      : null,
+    result: normalizeResult(payload.result, currentGameId),
+  };
+}
+
+function applyDimensions(next: ClientState, payload: Record<string, unknown>) {
+  const gridCols = asPositiveInt(payload.gridCols, next.gridCols);
+  const gridRows = asPositiveInt(payload.gridRows, next.gridRows);
+  next.gridCols = gridCols;
+  next.gridRows = gridRows;
+  next.pieceCount = getPieceCount(
+    gridCols,
+    gridRows,
+    asPositiveInt(payload.pieceCount, next.pieceCount),
+  );
+}
+
+function logStateRejected(reason: string, event: GameEvent, meta: Record<string, unknown> = {}) {
+  console.warn("[STATE_REJECTED]", {
+    reason,
+    type: event.type,
+    eventId: event.eventId ?? null,
+    gameId: getEventGameId(event),
+    ...meta,
+  });
+}
+
+async function decodeImageSrc(src: string): Promise<void> {
+  if (typeof Image === "undefined") return;
+  const img = new Image();
+  img.decoding = "async";
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("Image decode failed"));
+    img.src = src;
+  });
+  if (typeof img.decode === "function") {
+    await img.decode().catch(() => undefined);
+  }
+}
+
 export function formatClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(total / 60);
@@ -78,9 +269,26 @@ export function useFuzalGame(opts: UseOpts) {
   const [connState, setConnState] = useState<ConnectionState>("connecting");
   const [toast, setToast] = useState<string | null>(null);
   const [goFlash, setGoFlash] = useState(false);
+  const [pieceSrcs, setPieceSrcs] = useState<Record<number, string>>({});
+  const [piecesLoading, setPiecesLoading] = useState(false);
+  const [piecesError, setPiecesError] = useState<string | null>(null);
+  const [loadAttempts, setLoadAttempts] = useState(0);
+
   const clockOffset = useRef(0);
   const socketRef = useRef<FuzalSocket | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateRef = useRef<ClientState | null>(null);
+  const lastAppliedEventId = useRef(0);
+  const swapInFlightRef = useRef<string | null>(null);
+
+  const commitState = useCallback((next: ClientState | null) => {
+    stateRef.current = next;
+    setState(next);
+  }, []);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -88,21 +296,72 @@ export function useFuzalGame(opts: UseOpts) {
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const applyEvent = useCallback((event: GameEvent) => {
-    clockOffset.current = event.at - Date.now();
-    const p = (event.payload ?? {}) as Record<string, unknown>;
-
-    setState((prev) => {
-      if (event.type === EventType.SNAPSHOT) {
-        return p as unknown as ClientState;
+  const applyEvent = useCallback(
+    (event: GameEvent): boolean => {
+      if (typeof event.at === "number") {
+        clockOffset.current = event.at - Date.now();
       }
-      if (!prev) return prev;
+      const p = (event.payload ?? {}) as Record<string, unknown>;
+
+      if (event.type === EventType.SNAPSHOT) {
+        const snapshot = normalizeSnapshot(p, event, opts.kind);
+        commitState(snapshot);
+        if (Number.isInteger(event.eventId) && Number(event.eventId) > lastAppliedEventId.current) {
+          lastAppliedEventId.current = Number(event.eventId);
+        }
+        return true;
+      }
+
+      const prev = stateRef.current;
+      if (!prev) {
+        logStateRejected("NO_SNAPSHOT", event);
+        return false;
+      }
+
+      const decision = shouldAcceptGameEvent(
+        {
+          currentStatus: prev.status,
+          currentGameId: prev.currentGameId,
+          lastAppliedEventId: lastAppliedEventId.current,
+        },
+        event,
+      );
+      if (!decision.accept) {
+        logStateRejected(decision.reason ?? "UNKNOWN", event, {
+          current: decision.current,
+          incoming: decision.incoming,
+        });
+        return false;
+      }
+
+      const nextCols = asPositiveInt(p.gridCols, prev.gridCols);
+      const nextRows = asPositiveInt(p.gridRows, prev.gridRows);
+      const nextPieceCount = getPieceCount(
+        nextCols,
+        nextRows,
+        asPositiveInt(p.pieceCount, prev.pieceCount),
+      );
+      if (
+        (event.type === EventType.PUZZLE_STARTED || event.type === EventType.PUZZLE_MOVE) &&
+        Array.isArray(p.board) &&
+        !isValidPuzzleBoard(p.board, nextPieceCount)
+      ) {
+        logStateRejected("INVALID_BOARD", event, { pieceCount: nextPieceCount });
+        return false;
+      }
+
       const next: ClientState = { ...prev };
+      applyDimensions(next, p);
+      const eventGameId = getEventGameId(event);
+      if (eventGameId) {
+        next.currentGameId = eventGameId;
+      }
 
       switch (event.type) {
         case EventType.LOBBY_UPDATED: {
           if (Array.isArray(p.players)) next.players = p.players as PlayerView[];
-          if (typeof p.status === "string") next.status = p.status as GameState;
+          if (isGameState(p.status)) next.status = p.status;
+          if (p.currentGameId === null) next.currentGameId = null;
           break;
         }
         case EventType.PLAYER_JOINED: {
@@ -124,20 +383,20 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
         case EventType.GAME_STARTED: {
-          next.status = "MEMORY";
+          next.status = GameState.MEMORY;
           next.result = null;
           break;
         }
         case EventType.MEMORY_PHASE_STARTED: {
-          next.status = "MEMORY";
+          next.status = GameState.MEMORY;
           next.result = null;
           next.puzzle = null;
           next.puzzleProgress = null;
           next.puzzleStartedAt = null;
           next.memory = {
-            startedAt: p.startedAt as number,
-            endsAt: p.endsAt as number,
-            durationSeconds: p.durationSeconds as number,
+            startedAt: asNumber(p.startedAt, Date.now()),
+            endsAt: asNumber(p.endsAt, Date.now()),
+            durationSeconds: asNumber(p.durationSeconds, 0),
           };
           if (p.image) next.image = p.image as ClientState["image"];
           if (typeof p.imageName === "string") next.imageName = p.imageName;
@@ -150,31 +409,41 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
         case EventType.PUZZLE_STARTED: {
-          next.status = "PUZZLE";
+          next.status = GameState.PUZZLE;
           next.memory = null;
-          next.puzzleStartedAt = (p.startedAt as number) ?? Date.now();
-          next.puzzleEndsAt =
-            (p.endsAt as number) ?? (next.puzzleStartedAt + 180_000);
-          next.puzzleDurationSeconds = (p.durationSeconds as number) ?? 180;
+          next.puzzleStartedAt = asNumber(p.startedAt, next.puzzleStartedAt ?? Date.now());
+          next.puzzleEndsAt = asNumber(
+            p.endsAt,
+            next.puzzleStartedAt + 180_000,
+          );
+          next.puzzleDurationSeconds = asNumber(p.durationSeconds, 180);
           if (Array.isArray(p.players)) {
             next.puzzleProgress = p.players as ProgressView[];
           }
           if (Array.isArray(p.board)) {
+            const board = p.board as number[];
+            const boardChanged =
+              !prev.puzzle ||
+              prev.puzzle.board.length !== board.length ||
+              prev.puzzle.board.some((piece, slot) => piece !== board[slot]);
             next.puzzle = {
-              board: p.board as number[],
-              moves: (p.moves as number) ?? 0,
+              board,
+              moves: asNumber(p.moves, 0),
               startedAt: next.puzzleStartedAt,
-              correctSlots: computeCorrect(p.board as number[]),
-              eliminated: false,
+              correctSlots: computeCorrect(board),
+              eliminated: prev.puzzle?.eliminated ?? false,
+              completed: Boolean(p.completed),
             };
-            setGoFlash(true);
-            setTimeout(() => setGoFlash(false), 950);
+            if (boardChanged && opts.kind === "player") {
+              setGoFlash(true);
+              setTimeout(() => setGoFlash(false), 950);
+            }
           }
           break;
         }
         case EventType.PUZZLE_TIMER_UPDATED: {
           if (typeof p.endsAt === "number") {
-            next.puzzleEndsAt = p.endsAt as number;
+            next.puzzleEndsAt = p.endsAt;
           }
           break;
         }
@@ -198,11 +467,14 @@ export function useFuzalGame(opts: UseOpts) {
             const isCompleted = Boolean(p.completed);
             next.puzzle = {
               board,
-              moves: (p.moves as number) ?? next.puzzle?.moves ?? 0,
+              moves: asNumber(p.moves, next.puzzle?.moves ?? 0),
               startedAt: next.puzzle?.startedAt ?? Date.now(),
               correctSlots: computeCorrect(board),
               eliminated: next.puzzle?.eliminated ?? false,
               completed: next.puzzle?.completed || isCompleted,
+              completedAt:
+                next.puzzle?.completedAt ??
+                (isCompleted ? asNumber(p.completedAt, Date.now()) : undefined),
             };
           }
           if (typeof p.playerId === "string" && Array.isArray(next.puzzleProgress)) {
@@ -210,8 +482,9 @@ export function useFuzalGame(opts: UseOpts) {
               pr.id === p.playerId
                 ? {
                     ...pr,
-                    moves: (p.moves as number) ?? pr.moves,
-                    correctCount: (p.correctCount as number) ?? pr.correctCount,
+                    moves: asNumber(p.moves, pr.moves),
+                    correctCount: asNumber(p.correctCount, pr.correctCount),
+                    completed: pr.completed || Boolean(p.completed),
                   }
                 : pr,
             );
@@ -219,6 +492,13 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
         case EventType.PLAYER_COMPLETED: {
+          if (p.playerId === opts.playerId && next.puzzle) {
+            next.puzzle = {
+              ...next.puzzle,
+              completed: true,
+              completedAt: asNumber(p.at, Date.now()),
+            };
+          }
           if (Array.isArray(next.puzzleProgress)) {
             next.puzzleProgress = next.puzzleProgress.map((pr) =>
               pr.id === p.playerId ? { ...pr, completed: true } : pr,
@@ -227,14 +507,17 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
         case EventType.GAME_FINISHED: {
-          next.status = "FINISHED";
-          next.result = p as unknown as ResultView;
-          next.players = (p.standings as PlayerView[]) ?? next.players;
+          next.status = GameState.FINISHED;
+          next.result = normalizeResult(p, eventGameId ?? next.currentGameId);
+          if (Array.isArray(p.standings)) {
+            next.players = p.standings as PlayerView[];
+          }
           if (p.image) next.image = p.image as ClientState["image"];
           break;
         }
         case EventType.NEW_GAME: {
-          next.status = (p.status as GameState) ?? "LOBBY";
+          next.currentGameId = eventGameId ?? asNullableString(p.gameId);
+          next.status = isGameState(p.status) ? p.status : GameState.MEMORY;
           next.result = null;
           next.puzzle = null;
           next.puzzleProgress = null;
@@ -253,17 +536,18 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
         case EventType.RESULTS_READY: {
-          next.status = "FINISHED";
-          if (p) next.result = p as unknown as ResultView;
+          next.status = GameState.FINISHED;
+          if (p) next.result = normalizeResult(p, eventGameId ?? next.currentGameId);
           break;
         }
         case EventType.LOBBY_RESET:
         case EventType.GAME_CLOSED: {
-          next.status = "LOBBY";
+          next.currentGameId = null;
+          next.status = GameState.LOBBY;
           next.result = null;
           next.puzzle = null;
           next.puzzleProgress = null;
-          next.players = Array.isArray(p?.players) ? (p.players as PlayerView[]) : [];
+          next.players = Array.isArray(p.players) ? (p.players as PlayerView[]) : [];
           next.memory = null;
           next.puzzleStartedAt = null;
           next.puzzleEndsAt = null;
@@ -282,18 +566,37 @@ export function useFuzalGame(opts: UseOpts) {
           break;
         }
       }
-      return next;
-    });
-  }, [opts.code, opts.kind, showToast]);
+
+      commitState(next);
+      if (Number.isInteger(event.eventId) && Number(event.eventId) > lastAppliedEventId.current) {
+        lastAppliedEventId.current = Number(event.eventId);
+      }
+      return true;
+    },
+    [commitState, opts.code, opts.kind, opts.playerId, showToast],
+  );
+
+  const authReady = useMemo(() => hasSocketAuth(opts), [opts]);
 
   useEffect(() => {
+    if (!authReady) {
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      setConnState("connecting");
+      return;
+    }
+
     const socket = new FuzalSocket({
       code: opts.code,
       kind: opts.kind,
       hostToken: opts.hostToken,
       playerId: opts.playerId,
       playerToken: opts.playerToken,
+      initialLastEventId: lastAppliedEventId.current,
       onEvent: applyEvent,
+      onCursorAdvance: (id) => {
+        if (id > lastAppliedEventId.current) lastAppliedEventId.current = id;
+      },
       onStateChange: setConnState,
       onSessionExpired: () => {
         if (opts.kind === "player") {
@@ -302,23 +605,38 @@ export function useFuzalGame(opts: UseOpts) {
             sessionStore.remove(`player:${opts.code}`);
           } catch {}
           showToast("Game session has ended or was reset by the host.");
-          setState((prev) =>
-            prev ? { ...prev, status: "LOBBY", puzzle: null, result: null, players: [] } : null,
+          const prev = stateRef.current;
+          commitState(
+            prev
+              ? {
+                  ...prev,
+                  status: GameState.LOBBY,
+                  currentGameId: null,
+                  puzzle: null,
+                  result: null,
+                  players: [],
+                }
+              : null,
           );
         }
       },
     });
     socketRef.current = socket;
     socket.connect();
-    return () => socket.disconnect();
-    // Re-create the socket when credentials arrive from stored sessions.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      if (socketRef.current === socket) socketRef.current = null;
+      socket.disconnect();
+    };
   }, [
+    applyEvent,
+    authReady,
+    commitState,
     opts.code,
+    opts.hostToken,
     opts.kind,
-    opts.hostToken ?? "",
-    opts.playerId ?? "",
-    opts.playerToken ?? "",
+    opts.playerId,
+    opts.playerToken,
+    showToast,
   ]);
 
   // 4fps ticker drives server-synchronized countdowns / elapsed time.
@@ -341,7 +659,7 @@ export function useFuzalGame(opts: UseOpts) {
     const start = state.puzzle?.startedAt ?? state.puzzleStartedAt;
     if (!start) return 0;
     const end =
-      state.status === "FINISHED"
+      state.status === GameState.FINISHED
         ? state.result?.finishedAt ?? Date.now() + clockOffset.current
         : Date.now() + clockOffset.current;
     return Math.max(0, end - start);
@@ -349,7 +667,7 @@ export function useFuzalGame(opts: UseOpts) {
 
   const puzzleRemainingMs = (() => {
     if (!state) return 0;
-    if (state.status !== "PUZZLE") return 0;
+    if (state.status !== GameState.PUZZLE) return 0;
     const endsAt =
       state.puzzleEndsAt ??
       (state.puzzleStartedAt ? state.puzzleStartedAt + 180_000 : null);
@@ -358,9 +676,23 @@ export function useFuzalGame(opts: UseOpts) {
   })();
 
   const isEliminated = Boolean(
-    (state?.status === "PUZZLE" && puzzleRemainingMs <= 0 && !state.puzzle?.completed) ||
-    state?.puzzle?.eliminated ||
-    (state?.status === "FINISHED" && state.result && !state.result.winner && !state.puzzle?.completed)
+    (state?.status === GameState.PUZZLE && puzzleRemainingMs <= 0 && !state.puzzle?.completed) ||
+      state?.puzzle?.eliminated ||
+      (state?.status === GameState.FINISHED &&
+        state.result &&
+        !state.result.winner &&
+        !state.puzzle?.completed),
+  );
+
+  const currentPieceCount = state
+    ? getPieceCount(state.gridCols, state.gridRows, state.pieceCount)
+    : 0;
+  const currentGameId = state?.currentGameId ?? null;
+  const shouldLoadPieces =
+    state?.status === GameState.MEMORY || state?.status === GameState.PUZZLE;
+  const piecesLoadedCount = useMemo(
+    () => countLoadedPieces(pieceSrcs, currentPieceCount),
+    [currentPieceCount, pieceSrcs],
   );
 
   /* ---------------- Actions ---------------- */
@@ -394,44 +726,49 @@ export function useFuzalGame(opts: UseOpts) {
 
   const swap = useCallback(
     async (from: number, to: number) => {
-      // Step 6: Prevent further moves if player is eliminated, parameters invalid, or puzzle already solved
+      const prev = stateRef.current;
       if (
         !opts.playerId ||
         !opts.playerToken ||
         from === to ||
         isEliminated ||
-        state?.puzzle?.completed
+        !prev?.puzzle ||
+        prev.puzzle.completed ||
+        swapInFlightRef.current
       ) {
         return;
       }
 
-      const totalPieces = (state?.gridCols ?? 3) * (state?.gridRows ?? 3);
-      let isNowSolved = false;
+      const totalPieces = getPieceCount(prev.gridCols, prev.gridRows, prev.pieceCount);
+      if (
+        from < 0 ||
+        to < 0 ||
+        from >= totalPieces ||
+        to >= totalPieces ||
+        !isValidBoard(prev.puzzle.board, totalPieces)
+      ) {
+        showToast("Puzzle board is still syncing. Please try again.");
+        return;
+      }
 
-      // Step 1: Update the board state
-      // Step 2: Recalculate which positions are correct
-      // Step 3: Check ALL positions against the canonical solved mapping
-      // Step 4: If all positions are correct, mark the puzzle SOLVED exactly once
-      setState((prev) => {
-        if (!prev?.puzzle || prev.puzzle.completed) return prev;
-        const nextBoard = swapPieces(prev.puzzle.board, from, to);
-        const nextCorrectSlots = computeCorrect(nextBoard);
-        isNowSolved = isSolved(nextBoard, totalPieces);
-
-        return {
-          ...prev,
-          puzzle: {
-            ...prev.puzzle,
-            board: nextBoard,
-            moves: prev.puzzle.moves + 1,
-            correctSlots: nextCorrectSlots,
-            completed: prev.puzzle.completed || isNowSolved,
-            completedAt: isNowSolved && !prev.puzzle.completedAt ? Date.now() : prev.puzzle.completedAt,
-          },
-        };
+      const actionId = makeActionId();
+      const previousPuzzle = prev.puzzle;
+      const nextBoard = swapPieces(prev.puzzle.board, from, to);
+      const solved = isSolved(nextBoard, totalPieces);
+      swapInFlightRef.current = actionId;
+      commitState({
+        ...prev,
+        puzzle: {
+          ...prev.puzzle,
+          board: nextBoard,
+          moves: prev.puzzle.moves + 1,
+          correctSlots: computeCorrect(nextBoard),
+          completed: prev.puzzle.completed || solved,
+          completedAt:
+            solved && !prev.puzzle.completedAt ? Date.now() : prev.puzzle.completedAt,
+        },
       });
 
-      // Step 5: Send exactly one completion/swap request to the server
       try {
         await postAction(opts.code, {
           type: "SWAP",
@@ -439,76 +776,96 @@ export function useFuzalGame(opts: UseOpts) {
           playerId: opts.playerId,
           from,
           to,
+          gameId: prev.currentGameId,
+          actionId,
         });
-
-        if (isNowSolved) {
-          try {
-            await postAction(opts.code, {
-              type: "COMPLETE",
-              token: opts.playerToken,
-              playerId: opts.playerId,
-            });
-          } catch {
-            // Server SWAP handler already independently validates and finishes the round
-          }
-        }
       } catch (e) {
+        const current = stateRef.current;
+        if (
+          swapInFlightRef.current === actionId &&
+          current?.status === GameState.PUZZLE &&
+          current.currentGameId === prev.currentGameId
+        ) {
+          commitState({ ...current, puzzle: previousPuzzle });
+        }
         showToast((e as Error).message);
+      } finally {
+        if (swapInFlightRef.current === actionId) {
+          swapInFlightRef.current = null;
+        }
       }
     },
-    [
-      opts.code,
-      opts.playerId,
-      opts.playerToken,
-      isEliminated,
-      state?.puzzle?.completed,
-      state?.gridCols,
-      state?.gridRows,
-      showToast,
-    ],
+    [commitState, isEliminated, opts.code, opts.playerId, opts.playerToken, showToast],
   );
 
   /* ------------- Preload puzzle pieces with retry & validation ------------- */
-  const [pieceSrcs, setPieceSrcs] = useState<Record<number, string>>({});
-  const [piecesLoading, setPiecesLoading] = useState(false);
-  const [piecesError, setPiecesError] = useState<string | null>(null);
-  const [loadAttempts, setLoadAttempts] = useState(0);
 
   const retryLoadPieces = useCallback(() => {
     setPiecesError(null);
     setLoadAttempts((c) => c + 1);
   }, []);
 
-  // Reset piece srcs when returning to lobby for a new round
   useEffect(() => {
-    if (state?.status === "LOBBY") {
+    if (state?.status === GameState.LOBBY || state?.status === GameState.FINISHED) {
       setPieceSrcs({});
+      setPiecesLoading(false);
       setPiecesError(null);
     }
-  }, [state?.status]);
+  }, [state?.status, currentGameId]);
 
   useEffect(() => {
-    if (
-      (state?.status !== "MEMORY" && state?.status !== "PUZZLE") ||
-      !opts.playerId ||
-      !opts.playerToken ||
-      !opts.code
-    ) {
-      return;
-    }
-    const total = (state.gridCols ?? 3) * (state.gridRows ?? 3);
-
-    // If already loaded for this round, do nothing
-    if (Object.keys(pieceSrcs).length >= total) {
+    if (!shouldLoadPieces || !hasPlayerAuth(opts) || !opts.code || currentPieceCount <= 0) {
+      if (!shouldLoadPieces) setPiecesLoading(false);
       return;
     }
 
+    const total = currentPieceCount;
+    const ids = requiredPieceIds(total);
+    const gameId = currentGameId;
     let cancelled = false;
     const created: string[] = [];
+    const loaded = new Set<number>();
+    let failed = 0;
+
+    const recordProgress = () => {
+      console.info("[PUZZLE_LOADING]", {
+        gameId,
+        pieceCount: total,
+        loaded: loaded.size,
+        failed,
+        ready: loaded.size === total && failed === 0,
+      });
+    };
+
+    async function acceptPiece(pieceId: number, src: string) {
+      await decodeImageSrc(src);
+      if (cancelled) return;
+      loaded.add(pieceId);
+      setPieceSrcs((prev) => ({ ...prev, [pieceId]: src }));
+      recordProgress();
+      if (loaded.size === total && failed === 0) {
+        setPiecesLoading(false);
+      }
+    }
+
+    async function loadBatch(): Promise<boolean> {
+      const batchUrl = `/api/lobbies/${opts.code}/pieces?p=${encodeURIComponent(
+        opts.playerId!,
+      )}&t=${encodeURIComponent(opts.playerToken!)}`;
+      const batchRes = await fetch(batchUrl);
+      if (!batchRes.ok) return false;
+      const batchData = await batchRes.json();
+      const pieces = batchData?.pieces as Record<string, string> | undefined;
+      if (!batchData?.ok || !pieces) return false;
+      if (!ids.every((pieceId) => typeof pieces[pieceId] === "string")) return false;
+
+      await Promise.all(ids.map((pieceId) => acceptPiece(pieceId, pieces[pieceId])));
+      return loaded.size === total;
+    }
 
     async function fetchTileWithRetry(pieceId: number, maxRetries = 3): Promise<string> {
       let lastErr = "";
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
         if (cancelled) throw new Error("Cancelled");
         try {
           const url = pieceUrl(opts.code!, pieceId, opts.playerId!, opts.playerToken!);
@@ -538,46 +895,31 @@ export function useFuzalGame(opts: UseOpts) {
     }
 
     async function preload() {
+      setPieceSrcs({});
       setPiecesLoading(true);
       setPiecesError(null);
+      recordProgress();
 
       try {
-        // Fast path: Single batch request for all 16 pieces (<20KB, ~50ms)
-        const batchUrl = `/api/lobbies/${opts.code}/pieces?p=${encodeURIComponent(
-          opts.playerId!,
-        )}&t=${encodeURIComponent(opts.playerToken!)}`;
-        const batchRes = await fetch(batchUrl);
-        if (batchRes.ok) {
-          const batchData = await batchRes.json();
-          if (
-            batchData.ok &&
-            batchData.pieces &&
-            Object.keys(batchData.pieces).length === total
-          ) {
-            if (!cancelled) {
-              setPieceSrcs(batchData.pieces);
-              setPiecesLoading(false);
-              return;
-            }
-          }
+        const loadedFromBatch = await loadBatch();
+        if (!loadedFromBatch) {
+          await Promise.all(
+            ids.map((pieceId) =>
+              fetchTileWithRetry(pieceId, 3)
+                .then((src) => acceptPiece(pieceId, src))
+                .catch((err) => {
+                  failed += 1;
+                  recordProgress();
+                  throw err;
+                }),
+            ),
+          );
         }
 
-        // Fallback path: Progressive individual tile prefetching
-        await Promise.all(
-          Array.from({ length: total }, (_, pieceId) =>
-            fetchTileWithRetry(pieceId, 3).then((url) => {
-              if (!cancelled) {
-                setPieceSrcs((prev) => ({ ...prev, [pieceId]: url }));
-              }
-            }),
-          ),
-        );
-
-        if (cancelled) {
-          created.forEach((u) => URL.revokeObjectURL(u));
-          return;
+        if (cancelled) return;
+        if (loaded.size !== total) {
+          throw new Error(`Loaded ${loaded.size}/${total} puzzle pieces.`);
         }
-
         setPiecesLoading(false);
       } catch (err) {
         if (!cancelled) {
@@ -595,14 +937,13 @@ export function useFuzalGame(opts: UseOpts) {
       created.forEach((u) => URL.revokeObjectURL(u));
     };
   }, [
-    state?.status,
-    state?.gridCols,
-    state?.gridRows,
-    opts.playerId,
-    opts.code,
-    opts.playerToken,
+    currentGameId,
+    currentPieceCount,
     loadAttempts,
-    pieceSrcs,
+    opts.code,
+    opts.playerId,
+    opts.playerToken,
+    shouldLoadPieces,
   ]);
 
   const exitGame = useCallback(() => {
@@ -611,8 +952,9 @@ export function useFuzalGame(opts: UseOpts) {
       sessionStore.remove("fuzal_player_session");
       sessionStore.remove(`player:${opts.code}`);
     } catch {}
-    setState(null);
-  }, [opts.code]);
+    lastAppliedEventId.current = 0;
+    commitState(null);
+  }, [commitState, opts.code]);
 
   return {
     state,
@@ -626,6 +968,7 @@ export function useFuzalGame(opts: UseOpts) {
     isEliminated,
     pieceSrcs,
     piecesLoading,
+    piecesLoadedCount,
     piecesError,
     retryLoadPieces,
     actions: { startGame, swap, playAgain, backToLobby, exitGame },

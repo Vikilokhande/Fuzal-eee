@@ -96,7 +96,7 @@ export default function HostPage() {
 
   const players = state.players;
   const canStart = players.length >= 1;
-  const totalPieces = state.gridCols * state.gridRows;
+  const totalPieces = state.pieceCount ?? state.gridCols * state.gridRows;
 
   return (
     <main className="relative min-h-screen w-full overflow-x-hidden px-3 py-6 sm:px-6 md:px-12 md:py-8">

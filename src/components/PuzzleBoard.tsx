@@ -22,6 +22,8 @@ export function PuzzleBoard({
   board,
   cols,
   rows,
+  pieceCount,
+  loadedCount,
   pieceSrcs,
   interactive = true,
   completed = false,
@@ -33,6 +35,8 @@ export function PuzzleBoard({
   board: number[];
   cols: number;
   rows: number;
+  pieceCount?: number;
+  loadedCount?: number;
   pieceSrcs: Record<number, string>;
   interactive?: boolean;
   completed?: boolean;
@@ -44,6 +48,7 @@ export function PuzzleBoard({
   const boardRef = useRef<HTMLDivElement | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [animSlots, setAnimSlots] = useState<number[]>([]);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const previous = useRef<number[]>(board);
   const animTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -89,9 +94,34 @@ export function PuzzleBoard({
     };
   }, [board]);
 
-  const total = cols * rows;
-  const ready = Object.keys(pieceSrcs).length >= total && !loading;
+  useEffect(() => {
+    const update = () => setViewportHeight(window.innerHeight);
+    update();
+    window.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("resize", update);
+    };
+  }, []);
+
+  const total = pieceCount ?? cols * rows;
+  const boardValid =
+    board.length === total &&
+    new Set(board).size === total &&
+    board.every((pieceId) => Number.isInteger(pieceId) && pieceId >= 0 && pieceId < total);
+  const loadedRequired = board.reduce(
+    (count, pieceId) => count + (pieceId >= 0 && pieceId < total && pieceSrcs[pieceId] ? 1 : 0),
+    0,
+  );
+  const displayLoaded = loadedCount ?? loadedRequired;
+  const ready = boardValid && loadedRequired >= total && !loading;
   const isInteractive = interactive && ready && !completed;
+  const aspectRatio = `${cols} / ${rows}`;
+  const maxBoardWidth =
+    viewportHeight === null
+      ? 520
+      : Math.max(230, Math.min(520, Math.floor((viewportHeight - 230) * (cols / rows))));
 
   // Clear any active drag or selection state once the puzzle is completed
   useEffect(() => {
@@ -266,8 +296,8 @@ export function PuzzleBoard({
       <div
         className="glass flex w-full flex-col items-center justify-center gap-4 rounded-2xl p-8 text-center shadow-2xl ring-1 ring-rose-500/30"
         style={{
-          aspectRatio: "1 / 1",
-          maxWidth: "min(94vw, 560px)",
+          aspectRatio,
+          maxWidth: `min(94vw, ${maxBoardWidth}px)`,
         }}
       >
         <div className="text-5xl">⚠️</div>
@@ -288,13 +318,19 @@ export function PuzzleBoard({
   }
 
   return (
-    <div className="relative mx-auto w-full max-w-[min(94vw,min(520px,calc(100dvh-230px)))] select-none">
+    <div
+      className="relative mx-auto w-full select-none"
+      style={{
+        aspectRatio,
+        maxWidth: `min(94vw, ${maxBoardWidth}px)`,
+      }}
+    >
       {/* Loading overlay while preloading tiles */}
       {!ready && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-2xl bg-black/75 backdrop-blur-sm">
           <span className="h-10 w-10 animate-spin rounded-full border-4 border-cyan-300 border-t-transparent" />
           <p className="text-xs font-bold uppercase tracking-[0.25em] text-cyan-300">
-            Loading {Object.keys(pieceSrcs).length}/{total} pieces…
+            Loading {Math.min(displayLoaded, total)}/{total} pieces...
           </p>
         </div>
       )}
@@ -305,7 +341,7 @@ export function PuzzleBoard({
         className="no-select grid w-full gap-[2px] sm:gap-[3px] rounded-2xl bg-black/40 p-[2px] sm:p-[3px] shadow-[0_18px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10"
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          aspectRatio: "1 / 1",
+          aspectRatio,
           touchAction: "none",
         }}
         role="grid"

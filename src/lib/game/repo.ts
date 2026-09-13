@@ -53,6 +53,16 @@ export function isTransientDbError(err: any): boolean {
   );
 }
 
+function isMissingGridSchema(err: any): boolean {
+  const msg = String(err?.message || err?.details || "").toLowerCase();
+  return (
+    msg.includes("grid_cols") ||
+    msg.includes("grid_rows") ||
+    msg.includes("piece_count") ||
+    msg.includes("schema cache")
+  );
+}
+
 /** Retries transient database operations with exponential backoff */
 export async function withDbRetry<T = any>(
   opName: string,
@@ -96,6 +106,7 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
   async put(lobby: Lobby): Promise<Lobby> {
     const code = lobby.code.toUpperCase();
+    lobby.pieceCount = lobby.gridCols * lobby.gridRows;
     this.processLobbies.set(code, lobby);
 
     if (!isSupabaseConfigured()) {
@@ -111,25 +122,51 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
     try {
       // 1. Upsert lobby row with retry
-      const { data: lobbyRow, error: lobbyErr } = await withDbRetry<any>(
+      const lobbyPayload = {
+        code,
+        host_token_hash: lobby.hostToken,
+        status: lobby.status,
+        max_players: lobby.maxPlayers,
+        grid_cols: lobby.gridCols,
+        grid_rows: lobby.gridRows,
+        piece_count: lobby.pieceCount,
+        current_game_id: lobby.currentGameId ?? null,
+        updated_at: new Date().toISOString(),
+      };
+      let { data: lobbyRow, error: lobbyErr } = await withDbRetry<any>(
         `upsert_lobby(${code})`,
         () =>
           supabaseAdmin
             .from("lobbies")
-            .upsert(
-              {
-                code,
-                host_token_hash: lobby.hostToken,
-                status: lobby.status,
-                max_players: lobby.maxPlayers,
-                current_game_id: lobby.currentGameId ?? null,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "code" },
-            )
+            .upsert(lobbyPayload, { onConflict: "code" })
             .select("id")
             .single(),
       );
+
+      if (lobbyErr && isMissingGridSchema(lobbyErr)) {
+        console.warn(
+          `[REPO_SCHEMA_WARN] lobbies grid columns are missing for ${code}; run migration 004_puzzle_dimensions.sql.`,
+        );
+        ({ data: lobbyRow, error: lobbyErr } = await withDbRetry<any>(
+          `upsert_lobby_legacy(${code})`,
+          () =>
+            supabaseAdmin
+              .from("lobbies")
+              .upsert(
+                {
+                  code,
+                  host_token_hash: lobby.hostToken,
+                  status: lobby.status,
+                  max_players: lobby.maxPlayers,
+                  current_game_id: lobby.currentGameId ?? null,
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: "code" },
+              )
+              .select("id")
+              .single(),
+        ));
+      }
 
       if (lobbyErr) {
         if (isTransientDbError(lobbyErr)) {
@@ -188,25 +225,37 @@ export class SupabaseLobbyRepository implements LobbyRepository {
       // 3. Sync current game & player boards in parallel
       if (lobby.currentGameId) {
         const gameStatus = lobby.status === GameState.LOBBY ? GameState.FINISHED : lobby.status;
+        const gamePayload = {
+          state: gameStatus,
+          memory_started_at: lobby.memory?.startedAt
+            ? new Date(lobby.memory.startedAt).toISOString()
+            : null,
+          memory_ends_at: lobby.memory?.endsAt
+            ? new Date(lobby.memory.endsAt).toISOString()
+            : null,
+          puzzle_started_at: lobby.puzzleStartedAt
+            ? new Date(lobby.puzzleStartedAt).toISOString()
+            : null,
+          finished_at: lobby.finishedAt
+            ? new Date(lobby.finishedAt).toISOString()
+            : null,
+          winner_player_id: lobby.winnerId ?? null,
+          grid_cols: lobby.gridCols,
+          grid_rows: lobby.gridRows,
+          piece_count: lobby.pieceCount,
+        };
+        const legacyGamePayload = {
+          state: gamePayload.state,
+          memory_started_at: gamePayload.memory_started_at,
+          memory_ends_at: gamePayload.memory_ends_at,
+          puzzle_started_at: gamePayload.puzzle_started_at,
+          finished_at: gamePayload.finished_at,
+          winner_player_id: gamePayload.winner_player_id,
+        };
         const gamePromise = withDbRetry<any>(`update_game(${lobby.currentGameId})`, () =>
           supabaseAdmin
             .from("games")
-            .update({
-              state: gameStatus,
-              memory_started_at: lobby.memory?.startedAt
-                ? new Date(lobby.memory.startedAt).toISOString()
-                : null,
-              memory_ends_at: lobby.memory?.endsAt
-                ? new Date(lobby.memory.endsAt).toISOString()
-                : null,
-              puzzle_started_at: lobby.puzzleStartedAt
-                ? new Date(lobby.puzzleStartedAt).toISOString()
-                : null,
-              finished_at: lobby.finishedAt
-                ? new Date(lobby.finishedAt).toISOString()
-                : null,
-              winner_player_id: lobby.winnerId ?? null,
-            })
+            .update(gamePayload)
             .eq("id", lobby.currentGameId!),
         );
 
@@ -234,7 +283,18 @@ export class SupabaseLobbyRepository implements LobbyRepository {
               )
             : Promise.resolve({ data: null, error: null });
 
-        const [gameRes, gpRes] = await Promise.all([gamePromise, gpPromise]);
+        let [gameRes, gpRes] = await Promise.all([gamePromise, gpPromise]);
+        if (gameRes.error && isMissingGridSchema(gameRes.error)) {
+          console.warn(
+            `[REPO_SCHEMA_WARN] games grid columns are missing for ${code}; run migration 004_puzzle_dimensions_and_actions.sql.`,
+          );
+          gameRes = await withDbRetry<any>(`update_game_legacy(${lobby.currentGameId})`, () =>
+            supabaseAdmin
+              .from("games")
+              .update(legacyGamePayload)
+              .eq("id", lobby.currentGameId!),
+          );
+        }
         if (gameRes.error) {
           console.warn(`[REPO_WARN] Failed to update game ${lobby.currentGameId}:`, gameRes.error.message);
         }
@@ -340,13 +400,19 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
       const playerRows = playersRes.data ?? [];
       const gameRow: Record<string, any> | null = gameRes.data;
+      const existingLobby = this.processLobbies.get(normCode);
+      const gridCols =
+        Number(lobbyRow.grid_cols ?? gameRow?.grid_cols ?? existingLobby?.gridCols ?? config.gridCols);
+      const gridRows =
+        Number(lobbyRow.grid_rows ?? gameRow?.grid_rows ?? existingLobby?.gridRows ?? config.gridRows);
+      const pieceCount =
+        Number(lobbyRow.piece_count ?? gameRow?.piece_count ?? gridCols * gridRows);
       const gamePlayerMap = new Map<string, Record<string, any>>();
       for (const gp of gpRes.data ?? []) {
         gamePlayerMap.set(gp.player_id, gp);
       }
 
       // 4. Hydrate runtime player objects
-      const existingLobby = this.processLobbies.get(normCode);
       const players: Player[] = (playerRows ?? []).map((row) => {
         const existingPlayer = existingLobby?.players.find((p) => p.id === row.id);
         const gp = gamePlayerMap.get(row.id);
@@ -443,8 +509,9 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           status: lobbyRow.status as GameState,
           players,
           maxPlayers: lobbyRow.max_players ?? 5,
-          gridCols: config.gridCols,
-          gridRows: config.gridRows,
+          gridCols,
+          gridRows,
+          pieceCount,
           currentGameId: lobbyRow.current_game_id ?? null,
           memory,
           puzzleStartedAt,
@@ -462,6 +529,9 @@ export class SupabaseLobbyRepository implements LobbyRepository {
         lobby.hostToken = lobbyRow.host_token_hash;
         lobby.status = lobbyRow.status as GameState;
         lobby.maxPlayers = lobbyRow.max_players ?? 5;
+        lobby.gridCols = gridCols;
+        lobby.gridRows = gridRows;
+        lobby.pieceCount = pieceCount;
         lobby.currentGameId = lobbyRow.current_game_id ?? null;
         lobby.players = players;
         lobby.memory = memory;

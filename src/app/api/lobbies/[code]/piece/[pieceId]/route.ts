@@ -8,6 +8,15 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+function pieceCountFromLobby(lobby: any): number {
+  const explicit = Number(lobby?.pieceCount ?? lobby?.piece_count);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const cols = Number(lobby?.gridCols ?? lobby?.grid_cols ?? 3);
+  const rows = Number(lobby?.gridRows ?? lobby?.grid_rows ?? 3);
+  return (Number.isInteger(cols) && cols > 0 ? cols : 3) *
+    (Number.isInteger(rows) && rows > 0 ? rows : 3);
+}
+
 /**
  * In-memory global piece buffer cache:
  * Key: `${slug}:${pieceId}`
@@ -22,6 +31,7 @@ const pieceCache = new Map<string, ArrayBuffer>();
  */
 interface AuthEntry {
   slug: string;
+  pieceCount: number;
   expiresAt: number;
 }
 const authCache = new Map<string, AuthEntry>();
@@ -49,6 +59,7 @@ export async function GET(
     const cacheKey = `${code}:${playerId}:${token}`;
     const cachedAuth = authCache.get(cacheKey);
     let slug = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.slug : null;
+    let total = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.pieceCount : 9;
 
     if (!slug) {
       // Check in-process lobby first (0ms)
@@ -63,6 +74,7 @@ export async function GET(
         if (p && safeEqualToken(token, p.token)) {
           const img = localLobby.memory?.image;
           slug = img?.slug ?? img?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
+          total = pieceCountFromLobby(localLobby);
         }
       }
 
@@ -97,11 +109,12 @@ export async function GET(
           );
         }
         slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        total = pieceCountFromLobby(lobby);
       }
 
       // Cache verified session for 120 seconds
       if (slug) {
-        authCache.set(cacheKey, { slug, expiresAt: Date.now() + 120_000 });
+        authCache.set(cacheKey, { slug, pieceCount: total, expiresAt: Date.now() + 120_000 });
       }
     }
 
@@ -109,6 +122,13 @@ export async function GET(
       return Response.json(
         { error: "FORBIDDEN", message: "Unauthorized piece request." },
         { status: 403 },
+      );
+    }
+
+    if (piece >= total) {
+      return Response.json(
+        { error: "BAD_REQUEST", message: "Invalid piece index for this puzzle." },
+        { status: 400 },
       );
     }
 

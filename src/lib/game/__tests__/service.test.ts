@@ -159,6 +159,29 @@ describe("state machine & timer", () => {
     const unique = new Set(boards.map((b) => b.join(",")));
     expect(unique.size).toBeGreaterThan(1);
   });
+
+  it("initializes 12-piece puzzles when a 3x4 lobby is selected", async () => {
+    const lobby = await lobbyService.createLobby({ gridCols: 3, gridRows: 4 });
+    const { player } = await lobbyService.join(lobby.code, "Twelve");
+    await gameService.startGame(lobby.code, lobby.hostToken);
+    await gameService.beginPuzzle(lobby.code);
+
+    const active = await lobbyRepo.getByCode(lobby.code);
+    const activePlayer = active!.players.find((p) => p.id === player.id)!;
+    const snapshot = lobbyService.buildSnapshot(active!, "player", activePlayer);
+
+    expect(active!.gridCols).toBe(3);
+    expect(active!.gridRows).toBe(4);
+    expect(active!.pieceCount).toBe(12);
+    expect(activePlayer.puzzle?.board).toHaveLength(12);
+    expect(activePlayer.puzzle?.board.slice().sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 12 }, (_, i) => i),
+    );
+    expect(snapshot.payload.pieceCount).toBe(12);
+    expect(snapshot.payload.puzzle?.board).toHaveLength(12);
+
+    await clearTimers(lobby.code);
+  });
 });
 
 describe("moves, validation & winner", () => {
@@ -195,6 +218,72 @@ describe("moves, validation & winner", () => {
     expect(winningPlayer.score).toBe(1);
     expect(lobby!.timerInterval).toBeNull();
     host.off();
+  });
+
+  it("dedupes retried player swap actions by actionId", async () => {
+    const setup = await setupLobby(1);
+    await gameService.startGame(setup.code, setup.hostToken);
+    await gameService.beginPuzzle(setup.code);
+
+    let lobby = await lobbyRepo.getByCode(setup.code);
+    const winner = setup.players[0];
+    const gameId = lobby!.currentGameId;
+    await moveOneFromSolved(setup.code, 0, [0, 1]);
+
+    await gameService.applySwap(
+      setup.code,
+      winner.id,
+      winner.token,
+      0,
+      1,
+      gameId,
+      "swap-action-0001",
+    );
+    lobby = await lobbyRepo.getByCode(setup.code);
+    expect(lobby!.status).toBe(GameState.FINISHED);
+    expect(lobby!.players[0].puzzle?.moves).toBe(1);
+    expect(lobby!.players[0].score).toBe(1);
+
+    await expect(
+      gameService.applySwap(
+        setup.code,
+        winner.id,
+        winner.token,
+        0,
+        1,
+        gameId,
+        "swap-action-0001",
+      ),
+    ).resolves.toBeUndefined();
+
+    lobby = await lobbyRepo.getByCode(setup.code);
+    expect(lobby!.players[0].puzzle?.moves).toBe(1);
+    expect(lobby!.players[0].score).toBe(1);
+  });
+
+  it("rejects player actions from an older game round before mutating", async () => {
+    const setup = await setupLobby(1);
+    await gameService.startGame(setup.code, setup.hostToken);
+    await gameService.beginPuzzle(setup.code);
+
+    const before = await lobbyRepo.getByCode(setup.code);
+    const player = setup.players[0];
+    const movesBefore = before!.players[0].puzzle?.moves;
+
+    await expect(
+      gameService.applySwap(
+        setup.code,
+        player.id,
+        player.token,
+        0,
+        1,
+        "older-round",
+        "swap-action-old-round",
+      ),
+    ).rejects.toMatchObject({ code: "OLD_GAME", httpStatus: 409 });
+
+    const after = await lobbyRepo.getByCode(setup.code);
+    expect(after!.players[0].puzzle?.moves).toBe(movesBefore);
   });
 
   it("atomic winner: only one of two simultaneous completions wins", async () => {

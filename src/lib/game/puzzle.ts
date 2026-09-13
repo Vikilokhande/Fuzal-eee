@@ -71,21 +71,36 @@ export function correctSlots(board: readonly number[]): boolean[] {
  *   3. Every slot s satisfies getCorrectPositionForPiece(board[s]) === s.
  */
 export function isSolved(board: readonly number[], pieceCount?: number): boolean {
+  if (!isValidBoard(board, pieceCount)) {
+    return false;
+  }
+  const count = pieceCount ?? board.length;
+  for (let slot = 0; slot < count; slot++) {
+    const pieceId = normalizePieceId(board[slot]);
+    if (!isPieceCorrectAtSlot(pieceId, slot)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function isValidBoard(board: readonly number[], pieceCount?: number): boolean {
   if (!Array.isArray(board) || board.length === 0) {
     return false;
   }
   const count = pieceCount ?? board.length;
-  if (board.length !== count) {
+  if (!Number.isInteger(count) || count <= 0 || board.length !== count) {
     return false;
   }
   const seen = new Set<number>();
   for (let slot = 0; slot < count; slot++) {
-    const pieceId = normalizePieceId(board[slot]);
-    if (pieceId < 0 || pieceId >= count || seen.has(pieceId)) {
-      return false; // Duplicate or out-of-range piece
-    }
-    seen.add(pieceId);
-    if (!isPieceCorrectAtSlot(pieceId, slot)) {
+    try {
+      const pieceId = normalizePieceId(board[slot]);
+      if (pieceId < 0 || pieceId >= count || seen.has(pieceId)) {
+        return false;
+      }
+      seen.add(pieceId);
+    } catch {
       return false;
     }
   }
@@ -122,7 +137,7 @@ export function generateShuffledBoard(pieceCount: number): number[] {
     if (!isSolved(board, pieceCount) && misplacedCount(board) >= 4) return board;
   }
   // Fallback: rotate by half
-  return solved.map((_, i) => (i + pieceCount / 2) % pieceCount);
+  return solved.map((_, i) => (i + Math.floor(pieceCount / 2)) % pieceCount);
 }
 
 export function swapPieces(

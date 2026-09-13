@@ -45,6 +45,8 @@ export async function POST(
           action.data.token,
           action.data.from,
           action.data.to,
+          action.data.gameId ?? null,
+          action.data.actionId,
         );
         break;
       case "COMPLETE":
@@ -52,6 +54,8 @@ export async function POST(
           code,
           action.data.playerId,
           action.data.token,
+          action.data.gameId ?? null,
+          action.data.actionId,
         );
         break;
       case "PLAY_AGAIN":

@@ -9,7 +9,7 @@
  * are serialized – only the first can become the winner.
  */
 import { timingSafeEqual } from "node:crypto";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
 import { config } from "./config";
 import { makePlayerId, makeToken, makeGameCode } from "./codes";
 import { imageService, SOURCE_VIEWBOX } from "./imageService";
@@ -18,6 +18,7 @@ import { findPlayer, lobbyRepo, withLobbyLock, withDbRetry } from "./repo";
 import {
   correctSlots,
   generateShuffledBoard,
+  isValidBoard,
   isSolved,
   swapPieces,
   validateIndex,
@@ -28,6 +29,7 @@ import {
   VALID_TRANSITIONS,
   PlayerConnection,
   type GameEvent,
+  type ImageMeta,
   type Lobby,
   type Player,
 } from "./types";
@@ -47,8 +49,9 @@ function ev(
   type: EventType,
   payload: unknown,
   lobbyId?: string,
+  gameId?: string | null,
 ): GameEvent {
-  return { type, at: Date.now(), lobbyId, payload };
+  return { type, at: Date.now(), lobbyId, gameId, payload };
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -58,6 +61,107 @@ function safeEqual(a: string, b: string): boolean {
   } catch {
     return a === b;
   }
+}
+
+const globalForActions = globalThis as typeof globalThis & {
+  __fuzalClientActions?: Set<string>;
+};
+const seenClientActions =
+  globalForActions.__fuzalClientActions ?? new Set<string>();
+if (process.env.NODE_ENV !== "production") {
+  globalForActions.__fuzalClientActions = seenClientActions;
+}
+
+function isDuplicateActionError(err: any): boolean {
+  const msg = String(err?.message || err?.details || "").toLowerCase();
+  return String(err?.code || "") === "23505" || msg.includes("duplicate key");
+}
+
+function isMissingClientActionsSchema(err: any): boolean {
+  const msg = String(err?.message || err?.details || "").toLowerCase();
+  return msg.includes("client_actions") || msg.includes("schema cache");
+}
+
+function isMissingDimensionSchema(err: any): boolean {
+  const msg = String(err?.message || err?.details || "").toLowerCase();
+  return (
+    msg.includes("grid_cols") ||
+    msg.includes("grid_rows") ||
+    msg.includes("piece_count") ||
+    msg.includes("schema cache")
+  );
+}
+
+async function claimClientAction(
+  code: string,
+  lobby: Lobby,
+  playerId: string,
+  actionType: "SWAP" | "COMPLETE",
+  clientGameId?: string | null,
+  actionId?: string,
+): Promise<boolean> {
+  if (clientGameId && clientGameId !== lobby.currentGameId) {
+    throw new GameError(
+      "OLD_GAME",
+      "This action belongs to an older game round.",
+      409,
+    );
+  }
+  if (!actionId) return true;
+
+  const normalizedCode = code.toUpperCase();
+  const key = `${normalizedCode}:${lobby.currentGameId ?? "no-game"}:${playerId}:${actionId}`;
+  if (seenClientActions.has(key)) {
+    console.log("[ACTION_DEDUPED]", {
+      code: normalizedCode,
+      gameId: lobby.currentGameId ?? null,
+      playerId,
+      actionType,
+      actionId,
+    });
+    return false;
+  }
+  seenClientActions.add(key);
+
+  if (!isSupabaseConfigured()) return true;
+
+  const { error } = await withDbRetry<any>(
+    `claim_client_action(${normalizedCode}:${actionId})`,
+    () =>
+      supabaseAdmin.from("client_actions").insert({
+        lobby_code: normalizedCode,
+        game_id: lobby.currentGameId ?? null,
+        player_id: playerId,
+        action_id: actionId,
+        action_type: actionType,
+      }),
+    1,
+  );
+
+  if (!error) return true;
+  if (isDuplicateActionError(error)) {
+    console.log("[ACTION_DEDUPED_DB]", {
+      code: normalizedCode,
+      gameId: lobby.currentGameId ?? null,
+      playerId,
+      actionType,
+      actionId,
+    });
+    return false;
+  }
+  if (isMissingClientActionsSchema(error)) {
+    console.warn(
+      "[ACTION_SCHEMA_WARN] client_actions table is missing; run migration 004_puzzle_dimensions_and_actions.sql.",
+    );
+    return true;
+  }
+
+  console.warn("[ACTION_PERSIST_WARN]", {
+    actionType,
+    actionId,
+    message: error.message,
+  });
+  return true;
 }
 
 function assertTransition(lobby: Lobby, to: GameState) {
@@ -120,6 +224,72 @@ function memoryBlock(lobby: Lobby, now: number) {
   };
 }
 
+async function createGameRoundRecord(
+  code: string,
+  lobby: Lobby,
+  image: ImageMeta,
+  startedAt: number,
+  endsAt: number,
+  logPrefix: string,
+): Promise<string | null> {
+  try {
+    const { data: lobbyRow } = await supabaseAdmin
+      .from("lobbies")
+      .select("id")
+      .eq("code", code.toUpperCase())
+      .maybeSingle();
+
+    const { data: imgRow } = await supabaseAdmin
+      .from("puzzle_images")
+      .select("id")
+      .eq("name", image.name)
+      .maybeSingle();
+
+    if (!lobbyRow || !imgRow) return null;
+
+    const payload = {
+      lobby_id: lobbyRow.id,
+      image_id: imgRow.id,
+      state: GameState.MEMORY,
+      memory_started_at: new Date(startedAt).toISOString(),
+      memory_ends_at: new Date(endsAt).toISOString(),
+      grid_cols: lobby.gridCols,
+      grid_rows: lobby.gridRows,
+      piece_count: lobby.pieceCount ?? lobby.gridCols * lobby.gridRows,
+    };
+    const legacyPayload = {
+      lobby_id: payload.lobby_id,
+      image_id: payload.image_id,
+      state: payload.state,
+      memory_started_at: payload.memory_started_at,
+      memory_ends_at: payload.memory_ends_at,
+    };
+
+    let { data: gameRow, error: gErr } = await supabaseAdmin
+      .from("games")
+      .insert(payload)
+      .select("id")
+      .single();
+
+    if (gErr && isMissingDimensionSchema(gErr)) {
+      console.warn(
+        `[${logPrefix}_SCHEMA_WARN] games grid columns are missing; run migration 004_puzzle_dimensions_and_actions.sql.`,
+      );
+      ({ data: gameRow, error: gErr } = await supabaseAdmin
+        .from("games")
+        .insert(legacyPayload)
+        .select("id")
+        .single());
+    }
+
+    if (gameRow) return gameRow.id;
+    if (gErr) console.error(`[${logPrefix}_DB_ERR]`, gErr.message);
+  } catch (err) {
+    console.error(`[${logPrefix}_ERR]`, err);
+  }
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Lobby service                                                       */
 /* ------------------------------------------------------------------ */
@@ -131,6 +301,8 @@ export const lobbyService = {
     memorySeconds?: number;
   }): Promise<Lobby> {
     const code = makeGameCode(4);
+    const gridCols = opts?.gridCols ?? config.gridCols;
+    const gridRows = opts?.gridRows ?? config.gridRows;
     const lobby: Lobby = {
       id: `FZ-${code}`,
       code,
@@ -138,8 +310,9 @@ export const lobbyService = {
       status: GameState.LOBBY,
       players: [],
       maxPlayers: config.maxPlayers,
-      gridCols: opts?.gridCols ?? config.gridCols,
-      gridRows: opts?.gridRows ?? config.gridRows,
+      gridCols,
+      gridRows,
+      pieceCount: gridCols * gridRows,
       memory: null,
       puzzleStartedAt: null,
       winnerId: null,
@@ -170,6 +343,9 @@ export const lobbyService = {
       maxPlayers: lobby.maxPlayers,
       playerCount: lobby.players.length,
       players: lobby.players.map(publicPlayer),
+      gridCols: lobby.gridCols,
+      gridRows: lobby.gridRows,
+      pieceCount: lobby.pieceCount ?? lobby.gridCols * lobby.gridRows,
       started:
         lobby.status === GameState.MEMORY || lobby.status === GameState.PUZZLE,
       full: lobby.players.length >= lobby.maxPlayers,
@@ -229,11 +405,11 @@ export const lobbyService = {
         lobby.players.push(player);
       }
 
-      manager.broadcast(
+      await manager.broadcast(
         code,
         ev(EventType.PLAYER_JOINED, { player: publicPlayer(player) }, lobby.id),
       );
-      manager.broadcast(
+      await manager.broadcast(
         code,
         ev(
           EventType.LOBBY_UPDATED,
@@ -270,7 +446,7 @@ export const lobbyService = {
     if (player.connectionStatus === PlayerConnection.DISCONNECTED) {
       player.connectionStatus = PlayerConnection.CONNECTED;
       await lobbyRepo.put(lobby);
-      manager.broadcast(
+      await manager.broadcast(
         code,
         ev(
           EventType.PLAYER_STATUS,
@@ -278,7 +454,7 @@ export const lobbyService = {
           lobby.id,
         ),
       );
-      manager.broadcast(
+      await manager.broadcast(
         code,
         ev(
           EventType.LOBBY_UPDATED,
@@ -300,7 +476,7 @@ export const lobbyService = {
       const current = lobby.players.find((p) => p.id === playerId);
       if (!current) return;
       current.connectionStatus = PlayerConnection.DISCONNECTED;
-      manager.broadcast(
+      void manager.broadcast(
         code,
         ev(
           EventType.PLAYER_STATUS,
@@ -308,7 +484,7 @@ export const lobbyService = {
           lobby.id,
         ),
       );
-      manager.broadcast(
+      void manager.broadcast(
         code,
         ev(
           EventType.LOBBY_UPDATED,
@@ -329,11 +505,11 @@ export const lobbyService = {
           ) {
             fresh.players = fresh.players.filter((p) => p.id !== playerId);
             await lobbyRepo.put(fresh);
-            manager.broadcast(
+            void manager.broadcast(
               code,
               ev(EventType.PLAYER_LEFT, { playerId }, fresh.id),
             );
-            manager.broadcast(
+            void manager.broadcast(
               code,
               ev(
                 EventType.LOBBY_UPDATED,
@@ -365,6 +541,8 @@ export const lobbyService = {
         maxPlayers: lobby.maxPlayers,
         gridCols: lobby.gridCols,
         gridRows: lobby.gridRows,
+        pieceCount: lobby.pieceCount ?? lobby.gridCols * lobby.gridRows,
+        currentGameId: lobby.currentGameId ?? null,
         serverNow: now,
         players: lobby.players.map(publicPlayer),
         you: you ? { id: you.id, name: you.name, score: you.score } : null,
@@ -419,7 +597,7 @@ export const lobbyService = {
       }
       p.result = resultPayload(lobby);
     }
-    return base;
+    return { ...base, gameId: lobby.currentGameId ?? null };
   },
 };
 
@@ -451,6 +629,7 @@ function resultPayload(lobby: Lobby) {
       return b.correctCount - a.correctCount || a.moves - b.moves;
     });
   return {
+    gameId: lobby.currentGameId ?? null,
     winner: winner ? publicPlayer(winner) : null,
     timeExpired,
     finishedAt: lobby.finishedAt,
@@ -494,74 +673,83 @@ export const gameService = {
       lobby.finishedAt = null;
       for (const p of lobby.players) p.puzzle = null;
 
-      // Create a game round record in Supabase
-      try {
-        const { data: lobbyRow } = await supabaseAdmin
-          .from("lobbies")
-          .select("id")
-          .eq("code", code.toUpperCase())
-          .maybeSingle();
-
-        const { data: imgRow } = await supabaseAdmin
-          .from("puzzle_images")
-          .select("id")
-          .eq("name", image.name)
-          .maybeSingle();
-
-        if (lobbyRow && imgRow) {
-          const { data: gameRow, error: gErr } = await supabaseAdmin
-            .from("games")
-            .insert({
-              lobby_id: lobbyRow.id,
-              image_id: imgRow.id,
-              state: GameState.MEMORY,
-              memory_started_at: new Date(startedAt).toISOString(),
-              memory_ends_at: new Date(endsAt).toISOString(),
-            })
-            .select("id")
-            .single();
-
-          if (gameRow) {
-            lobby.currentGameId = gameRow.id;
-          } else if (gErr) {
-            console.error("[START_GAME_DB_ERR]", gErr.message);
-          }
-        }
-      } catch (err) {
-        console.error("[START_GAME_ERR]", err);
-      }
+      const gameRowId = await createGameRoundRecord(
+        code,
+        lobby,
+        image,
+        startedAt,
+        endsAt,
+        "START_GAME",
+      );
+      if (gameRowId) lobby.currentGameId = gameRowId;
 
       await lobbyRepo.put(lobby);
 
-      manager.broadcast(code, ev(EventType.GAME_STARTED, { status: lobby.status, at: startedAt }, lobby.id));
+      const gameId = lobby.currentGameId ?? null;
+      const pieceCount = lobby.gridCols * lobby.gridRows;
+
+      await manager.broadcast(
+        code,
+        ev(
+          EventType.GAME_STARTED,
+          { status: lobby.status, at: startedAt, gameId, pieceCount },
+          lobby.id,
+          gameId,
+        ),
+      );
       // Host (big screen) receives the real image; phones only get the name.
-      manager.sendToHost(
+      await manager.sendToHost(
         code,
         ev(
           EventType.MEMORY_PHASE_STARTED,
-          { image, startedAt, endsAt, durationSeconds },
+          {
+            image,
+            startedAt,
+            endsAt,
+            durationSeconds,
+            gameId,
+            gridCols: lobby.gridCols,
+            gridRows: lobby.gridRows,
+            pieceCount,
+          },
           lobby.id,
+          gameId,
         ),
       );
-      manager.broadcastToPlayers(
+      await manager.broadcastToPlayers(
         code,
         ev(
           EventType.MEMORY_PHASE_STARTED,
-          { imageName: image.name, startedAt, endsAt, durationSeconds },
+          {
+            imageName: image.name,
+            startedAt,
+            endsAt,
+            durationSeconds,
+            gameId,
+            gridCols: lobby.gridCols,
+            gridRows: lobby.gridRows,
+            pieceCount,
+          },
           lobby.id,
+          gameId,
         ),
       );
-      manager.broadcast(
+      await manager.broadcast(
         code,
-        ev(EventType.MEMORY_TIMER_UPDATED, { remaining: durationSeconds, endsAt }, lobby.id),
+        ev(
+          EventType.MEMORY_TIMER_UPDATED,
+          { remaining: durationSeconds, endsAt, gameId },
+          lobby.id,
+          gameId,
+        ),
       );
 
       // Authoritative server clock: tick every second, hard transition at end.
       lobby.timerInterval = setInterval(() => {
         const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-        manager.broadcast(
+        void manager.broadcast(
           code,
-          ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt }, lobby.id),
+          ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt, gameId }, lobby.id, gameId),
         );
       }, 1000);
       (lobby.timerInterval as any)?.unref?.();
@@ -590,6 +778,8 @@ export const gameService = {
       lobby.puzzleEndsAt = endsAt;
       lobby.puzzleDurationSeconds = durationSeconds;
       const total = lobby.gridCols * lobby.gridRows;
+      lobby.pieceCount = total;
+      const gameId = lobby.currentGameId ?? null;
       for (const p of lobby.players) {
         // Every player receives an independent shuffle.
         p.puzzle = {
@@ -604,7 +794,7 @@ export const gameService = {
       }
       await lobbyRepo.put(lobby);
 
-      manager.broadcast(
+      await manager.broadcast(
         code,
         ev(
           EventType.PUZZLE_STARTED,
@@ -614,16 +804,19 @@ export const gameService = {
             durationSeconds,
             gridCols: lobby.gridCols,
             gridRows: lobby.gridRows,
+            pieceCount: total,
+            gameId,
             players: lobby.players.map(playerProgress),
           },
           lobby.id,
+          gameId,
         ),
       );
       // Personal shuffles go directly to each player only.
       for (const p of lobby.players) {
         const pz = p.puzzle;
         if (!pz) continue;
-        manager.sendToPlayer(
+        await manager.sendToPlayer(
           code,
           p.id,
           ev(
@@ -636,8 +829,11 @@ export const gameService = {
               durationSeconds,
               gridCols: lobby.gridCols,
               gridRows: lobby.gridRows,
+              pieceCount: total,
+              gameId,
             },
             lobby.id,
+            gameId,
           ),
         );
       }
@@ -645,9 +841,14 @@ export const gameService = {
       // Authoritative 3-minute countdown clock: tick every second
       lobby.timerInterval = setInterval(() => {
         const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-        manager.broadcast(
+        void manager.broadcast(
           code,
-          ev(EventType.PUZZLE_TIMER_UPDATED, { remaining, endsAt, durationSeconds }, lobby.id),
+          ev(
+            EventType.PUZZLE_TIMER_UPDATED,
+            { remaining, endsAt, durationSeconds, gameId },
+            lobby.id,
+            gameId,
+          ),
         );
       }, 1000);
       (lobby.timerInterval as any)?.unref?.();
@@ -667,13 +868,14 @@ export const gameService = {
       if (lobby.status !== GameState.PUZZLE) return;
 
       clearLobbyTimers(lobby);
+      const gameId = lobby.currentGameId ?? null;
 
       // Eliminate all players whose puzzle is not completed
       for (const p of lobby.players) {
         if (!p.puzzle?.completed) {
           p.eliminated = true;
           if (p.puzzle) p.puzzle.eliminated = true;
-          manager.sendToPlayer(
+          await manager.sendToPlayer(
             code,
             p.id,
             ev(
@@ -682,8 +884,10 @@ export const gameService = {
                 playerId: p.id,
                 reason: "TIME_EXPIRED",
                 message: "Time's up! You were eliminated because the 3-minute limit expired.",
+                gameId,
               },
               lobby.id,
+              gameId,
             ),
           );
         }
@@ -696,9 +900,9 @@ export const gameService = {
 
       await lobbyRepo.put(lobby);
 
-      manager.broadcast(
+      await manager.broadcast(
         lobby.code,
-        ev(EventType.GAME_FINISHED, resultPayload(lobby), lobby.id),
+        ev(EventType.GAME_FINISHED, resultPayload(lobby), lobby.id, gameId),
       );
     });
   },
@@ -713,6 +917,8 @@ export const gameService = {
     token: string,
     from: number,
     to: number,
+    clientGameId?: string | null,
+    actionId?: string,
   ): Promise<void> {
     const lobby = await lobbyService.getLobby(code);
     await withLobbyLock(lobby, async () => {
@@ -721,6 +927,15 @@ export const gameService = {
       if (!safeEqual(token, player.token)) {
         throw new GameError("FORBIDDEN", "Invalid player token.", 403);
       }
+      const claimed = await claimClientAction(
+        code,
+        lobby,
+        player.id,
+        "SWAP",
+        clientGameId,
+        actionId,
+      );
+      if (!claimed) return;
       if (lobby.status !== GameState.PUZZLE) {
         throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
       }
@@ -737,13 +952,27 @@ export const gameService = {
         throw new GameError("INVALID_STATE", "No active puzzle for player.", 409);
       }
       const total = lobby.gridCols * lobby.gridRows;
+      const gameId = lobby.currentGameId ?? null;
+      if (!isValidBoard(puzzle.board, total)) {
+        throw new GameError("INVALID_STATE", "Authoritative puzzle board is invalid.", 409);
+      }
       if (!validateIndex(from, total) || !validateIndex(to, total)) {
         throw new GameError("BAD_REQUEST", "Invalid puzzle index.", 422);
       }
       if (from === to) return; // no-op tap, ignore
 
+      const before = [...puzzle.board];
       puzzle.board = swapPieces(puzzle.board, from, to);
       puzzle.moves += 1;
+      console.log("[BOARD_MUTATION]", {
+        cause: "USER_SWAP",
+        gameId,
+        playerId,
+        from,
+        to,
+        before,
+        after: puzzle.board,
+      });
 
       const solved = isSolved(puzzle.board, total);
       if (solved) {
@@ -751,7 +980,7 @@ export const gameService = {
         puzzle.completedAt = Date.now();
         await lobbyRepo.put(lobby);
 
-        manager.sendToPlayer(
+        await manager.sendToPlayer(
           code,
           player.id,
           ev(
@@ -761,20 +990,28 @@ export const gameService = {
               moves: puzzle.moves,
               correctSlots: correctSlots(puzzle.board),
               completed: true,
+              pieceCount: total,
+              gameId,
             },
             lobby.id,
+            gameId,
           ),
         );
-        manager.broadcast(
+        await manager.broadcast(
           code,
-          ev(EventType.PLAYER_COMPLETED, { playerId: player.id, at: puzzle.completedAt }, lobby.id),
+          ev(
+            EventType.PLAYER_COMPLETED,
+            { playerId: player.id, at: puzzle.completedAt, gameId },
+            lobby.id,
+            gameId,
+          ),
         );
         await gameService.finish(lobby, player);
         return;
       }
 
       await lobbyRepo.put(lobby);
-      manager.sendToPlayer(
+      await manager.sendToPlayer(
         code,
         player.id,
         ev(
@@ -784,18 +1021,22 @@ export const gameService = {
             moves: puzzle.moves,
             correctSlots: correctSlots(puzzle.board),
             completed: false,
+            pieceCount: total,
+            gameId,
           },
           lobby.id,
+          gameId,
         ),
       );
       // Host sees only progress counts – never the arrangement.
-      manager.sendToHost(
+      await manager.sendToHost(
         code,
         ev(
           EventType.PUZZLE_MOVE,
           { playerId: player.id, moves: puzzle.moves, correctCount:
-            correctSlots(puzzle.board).filter(Boolean).length },
+            correctSlots(puzzle.board).filter(Boolean).length, gameId },
           lobby.id,
+          gameId,
         ),
       );
     });
@@ -806,7 +1047,13 @@ export const gameService = {
    * Client NEVER decides completion; server independently validates against
    * the canonical pieceId -> correctPosition mapping.
    */
-  async verifyCompletion(code: string, playerId: string, token: string): Promise<boolean> {
+  async verifyCompletion(
+    code: string,
+    playerId: string,
+    token: string,
+    clientGameId?: string | null,
+    actionId?: string,
+  ): Promise<boolean> {
     const lobby = await lobbyService.getLobby(code);
     return await withLobbyLock(lobby, async () => {
       const player = findPlayer(lobby, playerId);
@@ -814,6 +1061,15 @@ export const gameService = {
       if (!safeEqual(token, player.token)) {
         throw new GameError("FORBIDDEN", "Invalid player token.", 403);
       }
+      const claimed = await claimClientAction(
+        code,
+        lobby,
+        player.id,
+        "COMPLETE",
+        clientGameId,
+        actionId,
+      );
+      if (!claimed) return true;
       if (lobby.status !== GameState.PUZZLE) {
         throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
       }
@@ -822,6 +1078,10 @@ export const gameService = {
       if (puzzle.completed) return true;
 
       const total = lobby.gridCols * lobby.gridRows;
+      const gameId = lobby.currentGameId ?? null;
+      if (!isValidBoard(puzzle.board, total)) {
+        throw new GameError("INVALID_STATE", "Authoritative puzzle board is invalid.", 409);
+      }
       const solved = isSolved(puzzle.board, total);
       if (!solved) {
         throw new GameError("BAD_REQUEST", "Puzzle arrangement is not solved.", 400);
@@ -831,7 +1091,7 @@ export const gameService = {
       puzzle.completedAt = Date.now();
       await lobbyRepo.put(lobby);
 
-      manager.sendToPlayer(
+      await manager.sendToPlayer(
         code,
         player.id,
         ev(
@@ -841,13 +1101,21 @@ export const gameService = {
             moves: puzzle.moves,
             correctSlots: correctSlots(puzzle.board),
             completed: true,
+            pieceCount: total,
+            gameId,
           },
           lobby.id,
+          gameId,
         ),
       );
-      manager.broadcast(
+      await manager.broadcast(
         code,
-        ev(EventType.PLAYER_COMPLETED, { playerId: player.id, at: puzzle.completedAt }, lobby.id),
+        ev(
+          EventType.PLAYER_COMPLETED,
+          { playerId: player.id, at: puzzle.completedAt, gameId },
+          lobby.id,
+          gameId,
+        ),
       );
       await gameService.finish(lobby, player);
       return true;
@@ -886,9 +1154,10 @@ export const gameService = {
     winner.score += 1;
     clearLobbyTimers(lobby);
     await lobbyRepo.put(lobby);
-    manager.broadcast(
+    const gameId = lobby.currentGameId ?? null;
+    await manager.broadcast(
       lobby.code,
-      ev(EventType.GAME_FINISHED, resultPayload(lobby), lobby.id),
+      ev(EventType.GAME_FINISHED, resultPayload(lobby), lobby.id, gameId),
     );
   },
 
@@ -916,67 +1185,75 @@ export const gameService = {
       lobby.puzzleEndsAt = null;
       lobby.puzzleDurationSeconds = undefined;
 
-      // Create a fresh game round record in Supabase for the new round
-      try {
-        const { data: lobbyRow } = await supabaseAdmin
-          .from("lobbies")
-          .select("id")
-          .eq("code", code.toUpperCase())
-          .maybeSingle();
-
-        const { data: imgRow } = await supabaseAdmin
-          .from("puzzle_images")
-          .select("id")
-          .eq("name", image.name)
-          .maybeSingle();
-
-        if (lobbyRow && imgRow) {
-          const { data: gameRow, error: gErr } = await supabaseAdmin
-            .from("games")
-            .insert({
-              lobby_id: lobbyRow.id,
-              image_id: imgRow.id,
-              state: GameState.MEMORY,
-              memory_started_at: new Date(startedAt).toISOString(),
-              memory_ends_at: new Date(endsAt).toISOString(),
-            })
-            .select("id")
-            .single();
-
-          if (gameRow) {
-            lobby.currentGameId = gameRow.id;
-          } else if (gErr) {
-            console.error("[PLAY_AGAIN_DB_ERR]", gErr.message);
-          }
-        }
-      } catch (err) {
-        console.error("[PLAY_AGAIN_ERR]", err);
-      }
+      const gameRowId = await createGameRoundRecord(
+        code,
+        lobby,
+        image,
+        startedAt,
+        endsAt,
+        "PLAY_AGAIN",
+      );
+      if (gameRowId) lobby.currentGameId = gameRowId;
 
       await lobbyRepo.put(lobby);
 
-      manager.broadcast(code, ev(EventType.NEW_GAME, { status: lobby.status }, lobby.id));
-      manager.sendToHost(
+      const gameId = lobby.currentGameId ?? null;
+      const pieceCount = lobby.gridCols * lobby.gridRows;
+
+      await manager.broadcast(
         code,
-        ev(EventType.MEMORY_PHASE_STARTED, { image, startedAt, endsAt, durationSeconds }, lobby.id),
+        ev(EventType.NEW_GAME, { status: lobby.status, gameId, pieceCount }, lobby.id, gameId),
       );
-      manager.broadcastToPlayers(
+      await manager.sendToHost(
         code,
         ev(
           EventType.MEMORY_PHASE_STARTED,
-          { imageName: image.name, startedAt, endsAt, durationSeconds },
+          {
+            image,
+            startedAt,
+            endsAt,
+            durationSeconds,
+            gameId,
+            gridCols: lobby.gridCols,
+            gridRows: lobby.gridRows,
+            pieceCount,
+          },
           lobby.id,
+          gameId,
         ),
       );
-      manager.broadcast(
+      await manager.broadcastToPlayers(
         code,
-        ev(EventType.MEMORY_TIMER_UPDATED, { remaining: durationSeconds, endsAt }, lobby.id),
+        ev(
+          EventType.MEMORY_PHASE_STARTED,
+          {
+            imageName: image.name,
+            startedAt,
+            endsAt,
+            durationSeconds,
+            gameId,
+            gridCols: lobby.gridCols,
+            gridRows: lobby.gridRows,
+            pieceCount,
+          },
+          lobby.id,
+          gameId,
+        ),
+      );
+      await manager.broadcast(
+        code,
+        ev(
+          EventType.MEMORY_TIMER_UPDATED,
+          { remaining: durationSeconds, endsAt, gameId },
+          lobby.id,
+          gameId,
+        ),
       );
       lobby.timerInterval = setInterval(() => {
         const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-        manager.broadcast(
+        void manager.broadcast(
           code,
-          ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt }, lobby.id),
+          ev(EventType.MEMORY_TIMER_UPDATED, { remaining, endsAt, gameId }, lobby.id, gameId),
         );
       }, 1000);
       lobby.endTimeout = setTimeout(() => {
@@ -991,6 +1268,7 @@ export const gameService = {
     await withLobbyLock(lobby, async () => {
       assertHost(lobby, hostToken);
       clearLobbyTimers(lobby);
+      const previousGameId = lobby.currentGameId ?? null;
 
       // 1. Mark previous game round as permanently finished
       if (lobby.currentGameId) {
@@ -1033,20 +1311,26 @@ export const gameService = {
       await lobbyRepo.put(lobby);
 
       // 5. Broadcast LOBBY_RESET and GAME_CLOSED so connected clients exit cleanly
-      manager.broadcast(
+      await manager.broadcast(
         code,
-        ev(EventType.LOBBY_RESET, { status: lobby.status, players: [] }, lobby.id),
+        ev(
+          EventType.LOBBY_RESET,
+          { status: lobby.status, players: [], previousGameId },
+          lobby.id,
+          null,
+        ),
       );
-      manager.broadcast(
+      await manager.broadcast(
         code,
-        ev(EventType.GAME_CLOSED, { reason: "HOST_RESET" }, lobby.id),
+        ev(EventType.GAME_CLOSED, { reason: "HOST_RESET", previousGameId }, lobby.id, null),
       );
-      manager.broadcast(
+      await manager.broadcast(
         code,
         ev(
           EventType.LOBBY_UPDATED,
-          { players: [], status: lobby.status },
+          { players: [], status: lobby.status, previousGameId },
           lobby.id,
+          null,
         ),
       );
     });

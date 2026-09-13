@@ -8,6 +8,7 @@ export class GameError extends Error {
       | "BAD_REQUEST"
       | "CONFLICT"
       | "INVALID_STATE"
+      | "OLD_GAME"
       | "TIME_EXPIRED"
       | "SESSION_EXPIRED"
       | "INTERNAL_ERROR",

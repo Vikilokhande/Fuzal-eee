@@ -8,6 +8,28 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+function pieceCountFromLobby(lobby: any): number {
+  const explicit = Number(lobby?.pieceCount ?? lobby?.piece_count);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const cols = Number(lobby?.gridCols ?? lobby?.grid_cols ?? 3);
+  const rows = Number(lobby?.gridRows ?? lobby?.grid_rows ?? 3);
+  return (Number.isInteger(cols) && cols > 0 ? cols : 3) *
+    (Number.isInteger(rows) && rows > 0 ? rows : 3);
+}
+
+function selectRequiredPieces(
+  bundled: Record<number, string> | null | undefined,
+  total: number,
+): Record<number, string> | null {
+  if (!bundled) return null;
+  const selected: Record<number, string> = {};
+  for (let pieceId = 0; pieceId < total; pieceId += 1) {
+    if (typeof bundled[pieceId] !== "string") return null;
+    selected[pieceId] = bundled[pieceId];
+  }
+  return selected;
+}
+
 /**
  * Fast batch pieces endpoint:
  * Returns all 16 WebP pieces in a single compressed JSON response (<20KB).
@@ -33,6 +55,7 @@ export async function GET(
 
     // 1. Verify player session and determine active puzzle image
     let slug: string | null = null;
+    let total = 9;
 
     // Check in-process lobby first (0ms)
     const localLobby = (lobbyRepo as any).processLobbies?.get(code);
@@ -46,6 +69,7 @@ export async function GET(
       if (p && safeEqualToken(token, p.token)) {
         const img = localLobby.memory?.image;
         slug = img?.slug ?? img?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
+        total = pieceCountFromLobby(localLobby);
       }
     }
 
@@ -80,6 +104,7 @@ export async function GET(
         );
       }
       slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      total = pieceCountFromLobby(lobby);
     }
 
     if (!slug) {
@@ -90,12 +115,11 @@ export async function GET(
     }
 
     // 2. Fetch pre-sliced pieces from embedded bundle (0ms)
-    let pieces = getAllPiecesForSlug(slug);
+    let pieces = selectRequiredPieces(getAllPiecesForSlug(slug), total);
 
     // Fallback: If not in embedded bundle, fetch from Supabase Storage
     if (!pieces) {
       pieces = {};
-      const total = (localLobby?.gridCols ?? 3) * (localLobby?.gridRows ?? 3);
       const fetches = Array.from({ length: total }, async (_, pieceId) => {
         const pieceNumStr = String(pieceId).padStart(2, "0");
         const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
@@ -111,7 +135,7 @@ export async function GET(
     }
 
     return Response.json(
-      { ok: true, slug, pieces },
+      { ok: true, slug, pieceCount: total, pieces },
       {
         status: 200,
         headers: {

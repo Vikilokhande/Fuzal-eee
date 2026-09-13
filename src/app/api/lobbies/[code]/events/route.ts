@@ -119,6 +119,7 @@ export async function GET(
                 payload: ev.payload,
                 at: ev.at,
                 eventId: ev.id,
+                gameId: ev.gameId ?? null,
               }),
               ev.id,
             );

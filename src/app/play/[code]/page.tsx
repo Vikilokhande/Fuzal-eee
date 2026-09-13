@@ -63,12 +63,13 @@ export default function PlayerGamePage() {
     isEliminated,
     pieceSrcs,
     piecesLoading,
+    piecesLoadedCount,
     piecesError,
     retryLoadPieces,
   } = game;
 
   const totalPieces = useMemo(
-    () => (state ? state.gridCols * state.gridRows : 9),
+    () => (state ? state.pieceCount ?? state.gridCols * state.gridRows : 9),
     [state],
   );
 
@@ -335,6 +336,8 @@ export default function PlayerGamePage() {
                     board={state.puzzle.board}
                     cols={state.gridCols}
                     rows={state.gridRows}
+                    pieceCount={totalPieces}
+                    loadedCount={piecesLoadedCount}
                     pieceSrcs={pieceSrcs}
                     loading={piecesLoading}
                     error={piecesError}

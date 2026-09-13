@@ -7,7 +7,7 @@
     "start": "next start",
     "seed": "npx tsx scripts/seed-puzzles.ts",
     "lint": "eslint .",
-    "test": "vitest run src/lib/game/__tests__/puzzle.test.ts && vitest run src/lib/game/__tests__/puzzle-interaction.test.ts && vitest run src/lib/game/__tests__/board-mutation-regression.test.ts && vitest run src/lib/game/__tests__/repo-resilience.test.ts && vitest run src/lib/game/__tests__/supabase-storage.test.ts && vitest run src/lib/game/__tests__/production-flow.test.ts && vitest run src/lib/game/__tests__/session-lifecycle.test.ts",
+    "test": "vitest run src/lib/game/__tests__/puzzle.test.ts && vitest run src/lib/game/__tests__/client-state-machine.test.ts && vitest run src/lib/game/__tests__/realtime.test.ts && vitest run src/lib/game/__tests__/pieces-route-dynamic.test.ts && vitest run src/lib/game/__tests__/puzzle-interaction.test.ts && vitest run src/lib/game/__tests__/board-mutation-regression.test.ts && vitest run src/lib/game/__tests__/repo-resilience.test.ts && vitest run src/lib/game/__tests__/service.test.ts && vitest run src/lib/game/__tests__/supabase-storage.test.ts && vitest run src/lib/game/__tests__/production-flow.test.ts && vitest run src/lib/game/__tests__/session-lifecycle.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -36,6 +36,15 @@ def test_shuffle_never_solved_or_trivial():
         assert sorted(board) == list(range(16))
 
 
+def test_shuffle_supports_twelve_piece_boards():
+    for _ in range(100):
+        board = generate_shuffled_board(12)
+        assert len(board) == 12
+        assert not is_solved(board, 12)
+        assert sum(1 for i, x in enumerate(board) if x != i) >= 4
+        assert sorted(board) == list(range(12))
+
+
 def test_swap_is_immutable():
     assert swap_pieces([0, 1, 2, 3], 0, 3) == [3, 1, 2, 0]
 
@@ -134,6 +143,26 @@ def test_puzzle_independent_and_hidden_from_host(svc):
     assert len({tuple(b) for b in boards}) == len(boards)  # independent shuffles
     host_snap = svc.snapshot(fresh, "host", None)["payload"]
     assert host_snap["puzzle"] is None  # host never receives arrangements
+
+
+def test_puzzle_initializes_twelve_piece_lobby(svc):
+    async def scenario():
+        lobby = await svc.create_lobby(grid_cols=3, grid_rows=4)
+        player = await svc.join(lobby.code, "P0")
+        await svc.start_game(lobby.code, lobby.host_token)
+        await svc.begin_puzzle(lobby.code)
+        fresh = svc.get(lobby.code)
+        svc._cancel_timers(fresh)
+        assert fresh.grid_cols == 3
+        assert fresh.grid_rows == 4
+        assert len(player.puzzle.board) == 12
+        assert sorted(player.puzzle.board) == list(range(12))
+        snap = svc.snapshot(fresh, "player", player)["payload"]
+        assert snap["gridCols"] == 3
+        assert snap["gridRows"] == 4
+        assert len(snap["puzzle"]["board"]) == 12
+
+    run(scenario())
 
 
 def one_swap_from_solved(player, pair):
