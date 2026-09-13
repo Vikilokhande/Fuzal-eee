@@ -148,7 +148,7 @@ export async function GET(
       const rotateTimer = setTimeout(() => {
         if (closed) return;
         sendFrame(JSON.stringify({ type: "STREAM_END", at: Date.now() }), undefined, "stream_end");
-        cleanup();
+        setTimeout(() => cleanup(), 250);
       }, 25000);
       rotateTimer.unref?.();
 

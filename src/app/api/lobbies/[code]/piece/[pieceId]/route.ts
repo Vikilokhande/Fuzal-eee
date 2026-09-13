@@ -19,19 +19,21 @@ function pieceCountFromLobby(lobby: any): number {
 
 /**
  * In-memory global piece buffer cache:
- * Key: `${slug}:${pieceId}`
- * Value: ArrayBuffer of the 200x200 WebP tile (~850 bytes)
+ * Key: `${slug}:${cols}x${rows}:${pieceId}`
+ * Value: ArrayBuffer of the WebP tile
  */
 const pieceCache = new Map<string, ArrayBuffer>();
 
 /**
  * Short-lived in-memory auth cache:
  * Key: `${code}:${playerId}:${token}`
- * Value: { slug: string; expiresAt: number }
+ * Value: { slug: string; pieceCount: number; cols: number; rows: number; expiresAt: number }
  */
 interface AuthEntry {
   slug: string;
   pieceCount: number;
+  cols: number;
+  rows: number;
   expiresAt: number;
 }
 const authCache = new Map<string, AuthEntry>();
@@ -60,6 +62,8 @@ export async function GET(
     const cachedAuth = authCache.get(cacheKey);
     let slug = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.slug : null;
     let total = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.pieceCount : 9;
+    let cols = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.cols : 3;
+    let rows = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.rows : 3;
 
     if (!slug) {
       // Check in-process lobby first (0ms)
@@ -75,6 +79,8 @@ export async function GET(
           const img = localLobby.memory?.image;
           slug = img?.slug ?? img?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
           total = pieceCountFromLobby(localLobby);
+          cols = Number(localLobby.gridCols ?? 3);
+          rows = Number(localLobby.gridRows ?? 3);
         }
       }
 
@@ -110,11 +116,13 @@ export async function GET(
         }
         slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         total = pieceCountFromLobby(lobby);
+        cols = Number(lobby.gridCols ?? 3);
+        rows = Number(lobby.gridRows ?? 3);
       }
 
       // Cache verified session for 120 seconds
       if (slug) {
-        authCache.set(cacheKey, { slug, pieceCount: total, expiresAt: Date.now() + 120_000 });
+        authCache.set(cacheKey, { slug, pieceCount: total, cols, rows, expiresAt: Date.now() + 120_000 });
       }
     }
 
@@ -132,7 +140,7 @@ export async function GET(
       );
     }
 
-    // 2. Ultra-Fast: Check pre-sliced 200x200 WebP bundle first (0ms)
+    // 2. Check pre-sliced 200x200 WebP bundle first (0ms)
     const embeddedBuf = getPieceBuffer(slug, piece);
     if (embeddedBuf) {
       return new Response(embeddedBuf as unknown as BodyInit, {
@@ -144,45 +152,86 @@ export async function GET(
       });
     }
 
-    // 3. Fallback: In-memory piece cache or storage
-    const pieceNumStr = String(piece).padStart(2, "0");
-    const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
-    let arrayBuffer = pieceCache.get(piecePath);
+    // 3. Check in-memory piece cache
+    const pieceCacheKey = `${slug}:${cols}x${rows}:${piece}`;
+    let arrayBuffer = pieceCache.get(pieceCacheKey);
 
     if (!arrayBuffer) {
-      // Fast path: Fetch directly from Supabase public CDN endpoint
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/+$/, "");
-      const cdnUrl = `${supabaseUrl}/storage/v1/object/public/puzzle-images/${piecePath}`;
+      const pieceNumStr = String(piece).padStart(2, "0");
+      const piecePath = `${slug}/pieces/${pieceNumStr}.webp`;
 
+      // Fast path: Fetch directly from Supabase public CDN endpoint if grid matches pre-sliced files
       let fetchedData: ArrayBuffer | null = null;
-      try {
-        const cdnRes = await fetch(cdnUrl);
-        if (cdnRes.ok) {
-          fetchedData = await cdnRes.arrayBuffer();
+      if (cols === 4 && rows === 4) {
+        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/+$/, "");
+        const cdnUrl = `${supabaseUrl}/storage/v1/object/public/puzzle-images/${piecePath}`;
+        try {
+          const cdnRes = await fetch(cdnUrl);
+          if (cdnRes.ok) {
+            fetchedData = await cdnRes.arrayBuffer();
+          }
+        } catch {
+          // Fallback to SDK download
         }
-      } catch {
-        // Fallback to Supabase JS SDK download
+      }
+
+      if (!fetchedData && cols === 4 && rows === 4) {
+        const { data: fileData } = await supabaseAdmin.storage
+          .from("puzzle-images")
+          .download(piecePath);
+        if (fileData) {
+          fetchedData = await fileData.arrayBuffer();
+        }
+      }
+
+      // 4. Dynamic Slicing Fallback: When piece not pre-sliced for this grid (e.g. 12-piece: 3x4 / 4x3)
+      if (!fetchedData) {
+        try {
+          const { data: origData, error: origErr } = await supabaseAdmin.storage
+            .from("puzzle-images")
+            .download(`${slug}/original.webp`);
+          if (origData && !origErr) {
+            const origBuf = Buffer.from(await origData.arrayBuffer());
+            const sharp = (await import("sharp")).default;
+            const metadata = await sharp(origBuf).metadata();
+            const width = metadata.width || 800;
+            const height = metadata.height || 800;
+            const tileWidth = Math.floor(width / cols);
+            const tileHeight = Math.floor(height / rows);
+
+            const r = Math.floor(piece / cols);
+            const c = piece % cols;
+            const left = c * tileWidth;
+            const top = r * tileHeight;
+            const extractWidth = c === cols - 1 ? width - left : tileWidth;
+            const extractHeight = r === rows - 1 ? height - top : tileHeight;
+
+            const slicedBuf = await sharp(origBuf)
+              .extract({ left, top, width: extractWidth, height: extractHeight })
+              .webp({ quality: 85 })
+              .toBuffer();
+            fetchedData = slicedBuf.buffer.slice(
+              slicedBuf.byteOffset,
+              slicedBuf.byteOffset + slicedBuf.byteLength,
+            ) as ArrayBuffer;
+          }
+        } catch (sliceErr) {
+          console.error(`[DYNAMIC_PIECE_SLICE_ERR]`, sliceErr);
+        }
       }
 
       if (!fetchedData) {
-        const { data: fileData, error: storageErr } = await supabaseAdmin.storage
-          .from("puzzle-images")
-          .download(piecePath);
-
-        if (storageErr || !fileData) {
-          console.error(
-            `[PIECE_ERROR] Failed to fetch piece: lobby=${code}, piece=${piece}, path=${piecePath}, error=${storageErr?.message}`,
-          );
-          return Response.json(
-            { error: "NOT_FOUND", message: "Piece asset not found in storage." },
-            { status: 404 },
-          );
-        }
-        fetchedData = await fileData.arrayBuffer();
+        console.error(
+          `[PIECE_ERROR] Failed to fetch piece: lobby=${code}, piece=${piece}, total=${total}`,
+        );
+        return Response.json(
+          { error: "NOT_FOUND", message: "Piece asset not found." },
+          { status: 404 },
+        );
       }
 
       arrayBuffer = fetchedData;
-      pieceCache.set(piecePath, arrayBuffer);
+      pieceCache.set(pieceCacheKey, arrayBuffer);
     }
 
     return new Response(arrayBuffer, {

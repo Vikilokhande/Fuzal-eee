@@ -325,6 +325,8 @@ export function useFuzalGame(opts: UseOpts) {
   const [piecesError, setPiecesError] = useState<string | null>(null);
   const [loadAttempts, setLoadAttempts] = useState(0);
 
+  const [nowMs, setNowMs] = useState(0);
+  const [serverClockOffset, setServerClockOffset] = useState(0);
   const clockOffset = useRef(0);
   const socketRef = useRef<FuzalSocket | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -363,7 +365,9 @@ export function useFuzalGame(opts: UseOpts) {
   const applyEvent = useCallback(
     (event: GameEvent): boolean => {
       if (typeof event.at === "number") {
-        clockOffset.current = event.at - Date.now();
+        const offset = event.at - Date.now();
+        clockOffset.current = offset;
+        setServerClockOffset(offset);
       }
       const p = (event.payload ?? {}) as Record<string, unknown>;
 
@@ -634,6 +638,9 @@ export function useFuzalGame(opts: UseOpts) {
             next.players = p.standings as PlayerView[];
           }
           if (p.image) next.image = p.image as ClientState["image"];
+          setPieceSrcs({});
+          setPiecesLoading(false);
+          setPiecesError(null);
           break;
         }
         case EventType.NEW_GAME: {
@@ -673,6 +680,9 @@ export function useFuzalGame(opts: UseOpts) {
           next.puzzleStartedAt = null;
           next.puzzleEndsAt = null;
           next.puzzleDurationSeconds = null;
+          setPieceSrcs({});
+          setPiecesLoading(false);
+          setPiecesError(null);
           if (opts.kind === "player") {
             try {
               sessionStore.remove("fuzal_player_session");
@@ -703,7 +713,7 @@ export function useFuzalGame(opts: UseOpts) {
     if (!authReady) {
       socketRef.current?.disconnect();
       socketRef.current = null;
-      setConnState("session_invalid");
+      queueMicrotask(() => setConnState("session_invalid"));
       return;
     }
 
@@ -755,17 +765,18 @@ export function useFuzalGame(opts: UseOpts) {
   ]);
 
   // 4fps ticker drives server-synchronized countdowns / elapsed time.
-  const [, setTick] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 250);
+    const id = setInterval(() => setNowMs(Date.now()), 250);
     return () => clearInterval(id);
   }, []);
 
-  const serverNow = useCallback(() => Date.now() + clockOffset.current, []);
+  const currentNow = nowMs > 0 ? nowMs : state?.serverNow ?? 0;
+  const currentServerTime = currentNow + serverClockOffset;
+  const serverNow = useCallback(() => currentServerTime, [currentServerTime]);
 
   const memorySeconds = (() => {
     if (!state?.memory) return 0;
-    const ms = state.memory.endsAt - (Date.now() + clockOffset.current);
+    const ms = state.memory.endsAt - currentServerTime;
     return Math.max(0, Math.ceil(ms / 1000));
   })();
 
@@ -775,8 +786,8 @@ export function useFuzalGame(opts: UseOpts) {
     if (!start) return 0;
     const end =
       state.status === GameState.FINISHED
-        ? state.result?.finishedAt ?? Date.now() + clockOffset.current
-        : Date.now() + clockOffset.current;
+        ? state.result?.finishedAt ?? currentServerTime
+        : currentServerTime;
     return Math.max(0, end - start);
   })();
 
@@ -787,8 +798,37 @@ export function useFuzalGame(opts: UseOpts) {
       state.puzzleEndsAt ??
       (state.puzzleStartedAt ? state.puzzleStartedAt + 180_000 : null);
     if (!endsAt) return 180_000;
-    return Math.max(0, endsAt - (Date.now() + clockOffset.current));
+    return Math.max(0, endsAt - currentServerTime);
   })();
+
+  // Atomic & idempotent client-side countdown expiration trigger:
+  // When memorySeconds reaches 0 and game is in MEMORY state, ask server to begin puzzle!
+  const beginPuzzleInFlightRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      state?.status === GameState.MEMORY &&
+      memorySeconds <= 0 &&
+      state.currentGameId &&
+      beginPuzzleInFlightRef.current !== state.currentGameId
+    ) {
+      beginPuzzleInFlightRef.current = state.currentGameId;
+      logClientDiagnostic("GAME_TRANSITION", {
+        action: "BEGIN_PUZZLE_CLIENT_TRIGGER",
+        gameId: state.currentGameId,
+      });
+      void postAction(opts.code, { type: "BEGIN_PUZZLE" }).catch((err) => {
+        logClientDiagnostic(
+          "ACTION_REJECTED",
+          {
+            type: "BEGIN_PUZZLE",
+            gameId: state.currentGameId,
+            error: (err as Error).message,
+          },
+          "warn",
+        );
+      });
+    }
+  }, [memorySeconds, opts.code, state?.currentGameId, state?.status]);
 
   const isEliminated = Boolean(
     (state?.status === GameState.PUZZLE && puzzleRemainingMs <= 0 && !state.puzzle?.completed) ||
@@ -977,17 +1017,9 @@ export function useFuzalGame(opts: UseOpts) {
     setLoadAttempts((c) => c + 1);
   }, []);
 
+  const hasAuth = hasPlayerAuth(opts);
   useEffect(() => {
-    if (state?.status === GameState.LOBBY || state?.status === GameState.FINISHED) {
-      setPieceSrcs({});
-      setPiecesLoading(false);
-      setPiecesError(null);
-    }
-  }, [state?.status, currentGameId]);
-
-  useEffect(() => {
-    if (!shouldLoadPieces || !hasPlayerAuth(opts) || !opts.code || currentPieceCount <= 0) {
-      if (!shouldLoadPieces) setPiecesLoading(false);
+    if (!shouldLoadPieces || !hasAuth || !opts.code || currentPieceCount <= 0) {
       return;
     }
 
@@ -1120,6 +1152,7 @@ export function useFuzalGame(opts: UseOpts) {
   }, [
     currentGameId,
     currentPieceCount,
+    hasAuth,
     loadAttempts,
     opts.code,
     opts.playerId,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Wordmark } from "@/components/Brand";
 import { Avatar } from "@/components/PlayerList";
@@ -27,37 +27,47 @@ export default function JoinPage() {
   const router = useRouter();
 
   const [lobby, setLobby] = useState<PublicLobby | null>(null);
-  const [phase, setPhase] = useState<
-    "loading" | "form" | "notfound" | "full" | "started" | "joining" | "error"
-  >("loading");
+  const [notFound, setNotFound] = useState(false);
+  const [joining, setJoining] = useState(false);
   const [name, setName] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const existing = useRef(sessionStore.get<{ player: JoinedPlayer }>(`player:${code}`));
+  const [existingSession] = useState(() =>
+    sessionStore.get<{ player: JoinedPlayer }>(`player:${code}`),
+  );
 
-  const poll = useCallback(async () => {
-    try {
-      const data = (await getLobby(code)) as PublicLobby;
-      setLobby(data);
-      setPhase((p) => (p === "loading" || p === "form" || p === "full" ? "form" : p));
-    } catch {
-      setPhase((p) => (p === "joining" ? p : "notfound"));
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchLobby() {
+      try {
+        const data = (await getLobby(code)) as PublicLobby;
+        if (!cancelled) {
+          setLobby(data);
+          setNotFound(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setNotFound(true);
+        }
+      }
     }
+    void fetchLobby();
+    const id = setInterval(() => void fetchLobby(), 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [code]);
 
-  useEffect(() => {
-    void poll();
-    const id = setInterval(() => void poll(), 2500);
-    return () => clearInterval(id);
-  }, [poll]);
-
-  // If the lobby starts before this player joins, block entry.
-  useEffect(() => {
-    if (lobby?.started) setPhase("started");
-    else if (lobby?.full && phase !== "joining") setPhase("full");
-    else if (lobby && !lobby.started && !lobby.full && (phase === "full" || phase === "started")) {
-      setPhase("form");
-    }
-  }, [lobby, phase]);
+  const phase: "loading" | "form" | "notfound" | "full" | "started" | "joining" | "error" =
+    (() => {
+      if (joining) return "joining";
+      if (notFound) return "notfound";
+      if (!lobby) return "loading";
+      if (lobby.started) return "started";
+      if (lobby.full) return "full";
+      if (errorMsg) return "error";
+      return "form";
+    })();
 
   async function doJoin(e?: React.FormEvent) {
     e?.preventDefault();
@@ -66,25 +76,28 @@ export default function JoinPage() {
       setErrorMsg("Please enter your name");
       return;
     }
-    setPhase("joining");
+    setJoining(true);
     setErrorMsg(null);
     try {
       const { player } = await joinLobby(code, trimmed);
       sessionStore.set(`player:${code}`, { player });
-      router.replace(`/play/${code}?p=${player.id}&t=${player.token}&n=${encodeURIComponent(player.name)}`);
+      router.replace(
+        `/play/${code}?p=${player.id}&t=${player.token}&n=${encodeURIComponent(player.name)}`,
+      );
     } catch (err) {
       const msg = (err as Error).message;
       setErrorMsg(msg);
-      if (msg.includes("full")) setPhase("full");
-      else if (msg.includes("started")) setPhase("started");
-      else setPhase("error");
+      setJoining(false);
     }
   }
 
   function resume() {
-    const s = existing.current;
-    if (s) {
-      router.replace(`/play/${code}?p=${s.player.id}&t=${s.player.token}&n=${encodeURIComponent(s.player.name)}`);
+    if (existingSession) {
+      router.replace(
+        `/play/${code}?p=${existingSession.player.id}&t=${existingSession.player.token}&n=${encodeURIComponent(
+          existingSession.player.name,
+        )}`,
+      );
     }
   }
 
@@ -118,9 +131,9 @@ export default function JoinPage() {
             This Fuzal game already has <b>5 players</b>.
             <br />Please wait for the next game.
           </p>
-          {existing.current && (
+          {existingSession && (
             <button className="btn-ghost mt-5 w-full" onClick={resume}>
-              Rejoin as {existing.current.player.name}
+              Rejoin as {existingSession.player.name}
             </button>
           )}
         </Card>}
@@ -133,7 +146,7 @@ export default function JoinPage() {
           <p className="mt-3 text-center text-indigo-100/80">
             This round is in progress. Wait for the host to start the next game.
           </p>
-          {existing.current && (
+          {existingSession && (
             <button className="btn-primary mt-5 w-full" onClick={resume}>
               Resume my game
             </button>
@@ -180,9 +193,9 @@ export default function JoinPage() {
               </button>
             </form>
 
-            {existing.current && (
+            {existingSession && (
               <button onClick={resume} className="mt-3 w-full text-center text-sm text-cyan-300 underline">
-                Resume as {existing.current.player.name}
+                Resume as {existingSession.player.name}
               </button>
             )}
           </Card>

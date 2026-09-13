@@ -4,12 +4,15 @@
 ALTER TABLE lobbies
 ADD COLUMN IF NOT EXISTS grid_cols INTEGER NOT NULL DEFAULT 3 CHECK (grid_cols >= 1),
 ADD COLUMN IF NOT EXISTS grid_rows INTEGER NOT NULL DEFAULT 3 CHECK (grid_rows >= 1),
-ADD COLUMN IF NOT EXISTS piece_count INTEGER NOT NULL DEFAULT 9 CHECK (piece_count >= 1);
+ADD COLUMN IF NOT EXISTS piece_count INTEGER NOT NULL DEFAULT 9 CHECK (piece_count >= 1),
+ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1);
 
 ALTER TABLE games
 ADD COLUMN IF NOT EXISTS grid_cols INTEGER NOT NULL DEFAULT 3 CHECK (grid_cols >= 1),
 ADD COLUMN IF NOT EXISTS grid_rows INTEGER NOT NULL DEFAULT 3 CHECK (grid_rows >= 1),
-ADD COLUMN IF NOT EXISTS piece_count INTEGER NOT NULL DEFAULT 9 CHECK (piece_count >= 1);
+ADD COLUMN IF NOT EXISTS piece_count INTEGER NOT NULL DEFAULT 9 CHECK (piece_count >= 1),
+ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+ADD COLUMN IF NOT EXISTS board JSONB;
 
 UPDATE lobbies
 SET piece_count = grid_cols * grid_rows
@@ -25,7 +28,10 @@ CREATE TABLE IF NOT EXISTS client_actions (
     game_id UUID REFERENCES games(id) ON DELETE SET NULL,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
     action_id TEXT NOT NULL,
-    action_type TEXT NOT NULL CHECK (action_type IN ('SWAP', 'COMPLETE')),
+    action_type TEXT NOT NULL CHECK (action_type IN ('SWAP', 'COMPLETE', 'BEGIN_PUZZLE')),
+    payload JSONB,
+    status TEXT NOT NULL DEFAULT 'ACCEPTED',
+    version INTEGER DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -37,5 +43,10 @@ ON client_actions (
     action_id
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_client_actions_game_action
+ON client_actions (game_id, action_id)
+WHERE game_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_client_actions_lobby_created
 ON client_actions(lobby_code, created_at DESC);
+

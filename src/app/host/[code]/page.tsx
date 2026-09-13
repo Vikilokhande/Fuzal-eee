@@ -18,21 +18,27 @@ export default function HostPage() {
   const code = String(params.code).toUpperCase();
   const router = useRouter();
   const search = useSearchParams();
-  const [token, setToken] = useState<string | null>(null);
-  const [badHost, setBadHost] = useState(false);
-
-  useEffect(() => {
-    const qt = search.get("token");
+  const [token] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const sp = new URLSearchParams(window.location.search);
+    const qt = sp.get("token");
     if (qt) {
       sessionStore.set(`host:${code}`, { token: qt });
-      setToken(qt);
       window.history.replaceState(null, "", `/host/${code}`);
-      return;
+      return qt;
     }
     const stored = sessionStore.get<{ token: string }>(`host:${code}`);
-    if (stored?.token) setToken(stored.token);
-    else setBadHost(true);
-  }, [code, search]);
+    return stored?.token ?? null;
+  });
+
+  const [badHost] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const sp = new URLSearchParams(window.location.search);
+    const qt = sp.get("token");
+    if (qt) return false;
+    const stored = sessionStore.get<{ token: string }>(`host:${code}`);
+    return !stored?.token;
+  });
 
   const game = useFuzalGame(token ? { code, kind: "host", hostToken: token } : { code, kind: "host" });
   const { state, connState, toast, memorySeconds, puzzleElapsedMs, puzzleRemainingMs, actions } = game;

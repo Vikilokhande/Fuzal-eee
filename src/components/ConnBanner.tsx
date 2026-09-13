@@ -3,13 +3,25 @@
 import type { ConnectionState } from "@/lib/fuzal/realtime";
 
 export function ConnBanner({ state }: { state: ConnectionState }) {
-  if (state === "open" || state === "rotating" || state === "session_invalid") {
+  // Only show warning during genuine connection failures/reconnects.
+  // Never show for initial connecting, normal rotation, or open states.
+  if (
+    state === "open" ||
+    state === "connecting" ||
+    state === "rotating" ||
+    state === "session_invalid"
+  ) {
     return null;
   }
+
   return (
-    <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 bg-amber-500/95 py-2 text-sm font-bold text-slate-950">
-      <span className="h-3 w-3 animate-pulse rounded-full bg-slate-950" />
-      {state === "connecting" ? "Connecting..." : "Reconnecting..."}
+    <div
+      role="status"
+      aria-live="polite"
+      className="pointer-events-none fixed top-3 right-3 z-50 flex items-center gap-2 rounded-full border border-amber-400/40 bg-slate-900/90 px-3 py-1.5 text-xs font-semibold text-amber-300 shadow-xl backdrop-blur-md"
+    >
+      <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+      <span>Reconnecting…</span>
     </div>
   );
 }

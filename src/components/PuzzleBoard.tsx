@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { isPieceCorrectAtSlot } from "@/lib/game/puzzle";
 
 /**
@@ -15,17 +15,20 @@ import { isPieceCorrectAtSlot } from "@/lib/game/puzzle";
  * Distinguishes TAP vs DRAG using an 8px movement threshold.
  * Prevents synthetic click double-triggers, native browser image dragging,
  * and image stretching/warping.
+ *
+ * High-performance 60fps drag: Uses dragAvatarRef for direct DOM transform updates,
+ * eliminating full-component React re-renders on pointermove.
  */
 const DRAG_THRESHOLD_PX = 8;
 
-type DragVisual = {
-  startSlot: number;
-  pointerId: number;
-  currentX: number;
-  currentY: number;
-  hoverSlot: number | null;
-  pieceSize: number;
-};
+function shouldThrottleDragLog(lastAt: { current: number }, minInterval = 120): boolean {
+  const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+  if (now - lastAt.current > minInterval) {
+    lastAt.current = now;
+    return true;
+  }
+  return false;
+}
 
 function logPuzzleDiagnostic(label: string, meta: Record<string, unknown>) {
   if (process.env.NODE_ENV !== "test") {
@@ -42,7 +45,6 @@ export function PuzzleBoard({
   pieceSrcs,
   interactive = true,
   completed = false,
-  loading = false,
   error = null,
   onRetry,
   onSwap,
@@ -61,16 +63,16 @@ export function PuzzleBoard({
   onSwap: (from: number, to: number) => void;
 }) {
   const boardRef = useRef<HTMLDivElement | null>(null);
+  const dragAvatarRef = useRef<HTMLDivElement | null>(null);
+  const dragAvatarImgRef = useRef<HTMLImageElement | null>(null);
+
   const [selected, setSelected] = useState<number | null>(null);
+  const [activeDragSlot, setActiveDragSlot] = useState<number | null>(null);
   const [animSlots, setAnimSlots] = useState<number[]>([]);
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const previous = useRef<number[]>(board);
   const animTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Active visual drag state for rendering the floating avatar and target hover
-  const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
-  const dragVisualRef = useRef<DragVisual | null>(null);
-  const dragFrameRef = useRef<number | null>(null);
   const lastDragMoveLogAt = useRef(Number.NEGATIVE_INFINITY);
 
   // Pointer tracking ref for synchronous, accurate gesture evaluation
@@ -82,40 +84,11 @@ export function PuzzleBoard({
     currentX: number;
     currentY: number;
     isDragging: boolean;
-    hoverSlot: number | null;
     cellRect: DOMRect | null;
   } | null>(null);
 
   // Mutex lock to prevent duplicate swaps from rapid tap or synthetic events
   const swapLockRef = useRef(false);
-
-  const scheduleDragVisual = useCallback((next: DragVisual) => {
-    dragVisualRef.current = next;
-    if (dragFrameRef.current !== null) return;
-
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      setDragVisual(next);
-      return;
-    }
-
-    dragFrameRef.current = window.requestAnimationFrame(() => {
-      dragFrameRef.current = null;
-      setDragVisual(dragVisualRef.current);
-    });
-  }, []);
-
-  const clearDragVisual = useCallback((commit = true) => {
-    dragVisualRef.current = null;
-    if (
-      dragFrameRef.current !== null &&
-      typeof window !== "undefined" &&
-      typeof window.cancelAnimationFrame === "function"
-    ) {
-      window.cancelAnimationFrame(dragFrameRef.current);
-    }
-    dragFrameRef.current = null;
-    if (commit) setDragVisual(null);
-  }, []);
 
   useEffect(() => {
     const prev = previous.current;
@@ -144,10 +117,6 @@ export function PuzzleBoard({
     };
   }, []);
 
-  useEffect(() => {
-    return () => clearDragVisual(false);
-  }, [clearDragVisual]);
-
   const total = pieceCount ?? cols * rows;
   const boardValid =
     board.length === total &&
@@ -158,22 +127,15 @@ export function PuzzleBoard({
     0,
   );
   const displayLoaded = loadedCount ?? loadedRequired;
-  const ready = boardValid && loadedRequired >= total && !loading;
+  // Ready as soon as board is valid and all required pieces are loaded (fixes 12/12 freeze)
+  const ready = boardValid && loadedRequired >= total;
   const isInteractive = interactive && ready && !completed;
+  const effectiveSelected = completed ? null : selected;
   const aspectRatio = `${cols} / ${rows}`;
   const maxBoardWidth =
     viewportHeight === null
       ? 520
       : Math.max(230, Math.min(520, Math.floor((viewportHeight - 230) * (cols / rows))));
-
-  // Clear any active drag or selection state once the puzzle is completed
-  useEffect(() => {
-    if (completed) {
-      setSelected(null);
-      clearDragVisual();
-      pointerTracker.current = null;
-    }
-  }, [clearDragVisual, completed]);
 
   /** Calculates grid slot from screen client coordinates */
   const getSlotAtCoords = (clientX: number, clientY: number): number | null => {
@@ -225,7 +187,6 @@ export function PuzzleBoard({
       currentX: e.clientX,
       currentY: e.clientY,
       isDragging: false,
-      hoverSlot: slot,
       cellRect,
     };
     lastDragMoveLogAt.current = Number.NEGATIVE_INFINITY;
@@ -244,40 +205,47 @@ export function PuzzleBoard({
 
     if (!tracker.isDragging && dist >= DRAG_THRESHOLD_PX) {
       tracker.isDragging = true;
-      // Drag started: clear tap selection so gestures do not conflict
+      // Drag started: clear tap selection and dim source slot
       setSelected(null);
+      setActiveDragSlot(tracker.startSlot);
+
+      // Initialize direct DOM avatar
+      if (dragAvatarRef.current && dragAvatarImgRef.current) {
+        const pieceId = board[tracker.startSlot];
+        const src = pieceSrcs[pieceId];
+        if (src) {
+          dragAvatarImgRef.current.src = src;
+          const size = tracker.cellRect?.width ?? 80;
+          dragAvatarRef.current.style.width = `${size}px`;
+          dragAvatarRef.current.style.height = `${size}px`;
+          dragAvatarRef.current.style.transform = `translate3d(${tracker.currentX - size / 2}px, ${
+            tracker.currentY - size / 2
+          }px, 0) scale(1.06)`;
+          dragAvatarRef.current.style.display = "block";
+        }
+      }
+
       logPuzzleDiagnostic("DRAG_START", {
         sourceIndex: tracker.startSlot,
       });
     }
 
     if (tracker.isDragging) {
-      const hover = getSlotAtCoords(e.clientX, e.clientY);
-      tracker.hoverSlot = hover;
+      // 60fps direct DOM translation: zero React re-renders on pointer move!
+      if (dragAvatarRef.current) {
+        const size = tracker.cellRect?.width ?? 80;
+        dragAvatarRef.current.style.transform = `translate3d(${e.clientX - size / 2}px, ${
+          e.clientY - size / 2
+        }px, 0) scale(1.06)`;
+      }
 
-      const now =
-        typeof performance !== "undefined" && typeof performance.now === "function"
-          ? performance.now()
-          : Date.now();
-      if (now - lastDragMoveLogAt.current > 120) {
-        lastDragMoveLogAt.current = now;
+      if (shouldThrottleDragLog(lastDragMoveLogAt, 120)) {
         logPuzzleDiagnostic("DRAG_MOVE", {
           sourceIndex: tracker.startSlot,
           pointerX: Math.round(e.clientX),
           pointerY: Math.round(e.clientY),
-          targetPreview: hover,
         });
       }
-
-      // Update visual drag position only. Logical board state is never mutated during move.
-      scheduleDragVisual({
-        startSlot: tracker.startSlot,
-        pointerId: tracker.pointerId,
-        currentX: e.clientX,
-        currentY: e.clientY,
-        hoverSlot: hover,
-        pieceSize: tracker.cellRect?.width ?? 80,
-      });
     }
   };
 
@@ -290,9 +258,12 @@ export function PuzzleBoard({
 
     if (!tracker || tracker.pointerId !== e.pointerId) return;
 
-    // Clear trackers immediately
+    // Clear trackers and hide avatar immediately
     pointerTracker.current = null;
-    clearDragVisual();
+    if (dragAvatarRef.current) {
+      dragAvatarRef.current.style.display = "none";
+    }
+    setActiveDragSlot(null);
 
     if (tracker.isDragging) {
       // ---------- DRAG GESTURE COMPLETED ----------
@@ -350,7 +321,10 @@ export function PuzzleBoard({
 
     if (tracker && tracker.pointerId === e.pointerId) {
       pointerTracker.current = null;
-      clearDragVisual();
+      if (dragAvatarRef.current) {
+        dragAvatarRef.current.style.display = "none";
+      }
+      setActiveDragSlot(null);
       setSelected(null);
     }
   };
@@ -414,11 +388,9 @@ export function PuzzleBoard({
         {board.map((pieceId, slot) => {
           const isCorrect = isPieceCorrectAtSlot(pieceId, slot);
           const src = pieceSrcs[pieceId];
-          const isSelected = selected === slot;
+          const isSelected = effectiveSelected === slot;
           const isAnimating = animSlots.includes(slot);
-          const isDragOrigin = dragVisual?.startSlot === slot;
-          const isDragHover =
-            dragVisual?.hoverSlot === slot && dragVisual?.startSlot !== slot;
+          const isDragOrigin = activeDragSlot === slot;
 
           return (
             <button
@@ -442,10 +414,10 @@ export function PuzzleBoard({
                   ? "ring-2 ring-cyan-400 shadow-[0_0_14px_rgba(34,211,238,0.75)] scale-[0.96] z-10"
                   : ""
               } ${isCorrect && ready && !isSelected ? "ring-1 ring-emerald-500/40" : ""} ${
-                isDragHover ? "ring-2 ring-cyan-300 bg-cyan-500/20 z-10" : ""
-              } ${isDragOrigin ? "opacity-30 scale-[0.95]" : ""} ${
-                isAnimating ? "animate-swap" : ""
-              } ${isInteractive ? "cursor-pointer" : "cursor-default"}`}
+                isDragOrigin ? "opacity-30 scale-[0.95]" : ""
+              } ${isAnimating ? "animate-swap" : ""} ${
+                isInteractive ? "cursor-pointer" : "cursor-default"
+              }`}
             >
               {src ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -470,32 +442,28 @@ export function PuzzleBoard({
         })}
       </div>
 
-      {/* Floating drag avatar following finger/pointer during drag */}
-      {dragVisual && dragVisual.startSlot !== null && pieceSrcs[board[dragVisual.startSlot]] && (
-        <div
-          className="pointer-events-none fixed z-50 overflow-hidden rounded-[7px] shadow-[0_10px_35px_rgba(0,0,0,0.85)] ring-2 ring-cyan-400 no-drag"
-          style={{
-            width: dragVisual.pieceSize,
-            height: dragVisual.pieceSize,
-            left: 0,
-            top: 0,
-            transform: `translate3d(${dragVisual.currentX - dragVisual.pieceSize / 2}px, ${
-              dragVisual.currentY - dragVisual.pieceSize / 2
-            }px, 0) scale(1.06)`,
-            touchAction: "none",
-            userSelect: "none",
-            willChange: "transform",
-          }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={pieceSrcs[board[dragVisual.startSlot]]}
-            alt="Dragging piece"
-            draggable={false}
-            className="pointer-events-none h-full w-full select-none no-drag object-cover"
-          />
-        </div>
-      )}
+      {/* Floating drag avatar following finger/pointer during drag - 60fps direct DOM manipulation */}
+      <div
+        ref={dragAvatarRef}
+        className="pointer-events-none fixed z-50 overflow-hidden rounded-[7px] shadow-[0_10px_35px_rgba(0,0,0,0.85)] ring-2 ring-cyan-400 no-drag"
+        style={{
+          display: "none",
+          left: 0,
+          top: 0,
+          touchAction: "none",
+          userSelect: "none",
+          willChange: "transform",
+        }}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          ref={dragAvatarImgRef}
+          src=""
+          alt="Dragging piece"
+          draggable={false}
+          className="pointer-events-none h-full w-full select-none no-drag object-cover"
+        />
+      </div>
     </div>
   );
 }

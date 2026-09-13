@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { gameService } from "@/lib/game/service";
+import { gameService, lobbyService } from "@/lib/game/service";
 import { actionSchema, LOBBY_CODE_RE } from "@/lib/game/types";
 import { errorResponse } from "@/lib/game/http";
 
@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 /**
  * POST /api/lobbies/:code/actions
  * Mutating commands (the "send" side of the realtime protocol):
- *   START_GAME | SWAP | PLAY_AGAIN | BACK_TO_LOBBY
+ *   START_GAME | BEGIN_PUZZLE | SWAP | COMPLETE | PLAY_AGAIN | BACK_TO_LOBBY
  * Winner status is NEVER accepted from clients – the server decides.
  */
 export async function POST(
@@ -38,8 +38,19 @@ export async function POST(
       case "START_GAME":
         await gameService.startGame(code, action.data.token);
         break;
-      case "SWAP":
-        await gameService.applySwap(
+      case "BEGIN_PUZZLE": {
+        await gameService.beginPuzzle(code);
+        const currentLobby = await lobbyService.getLobby(code);
+        return Response.json({
+          ok: true,
+          status: currentLobby.status,
+          gameId: currentLobby.currentGameId ?? null,
+          startedAt: currentLobby.puzzleStartedAt,
+          pieceCount: currentLobby.pieceCount,
+        });
+      }
+      case "SWAP": {
+        const swapResult = await gameService.applySwap(
           code,
           action.data.playerId,
           action.data.token,
@@ -48,7 +59,12 @@ export async function POST(
           action.data.gameId ?? null,
           action.data.actionId,
         );
-        break;
+        return Response.json({
+          ok: true,
+          actionId: action.data.actionId ?? null,
+          ...swapResult,
+        });
+      }
       case "COMPLETE":
         await gameService.verifyCompletion(
           code,

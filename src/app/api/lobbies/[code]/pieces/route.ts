@@ -32,8 +32,8 @@ function selectRequiredPieces(
 
 /**
  * Fast batch pieces endpoint:
- * Returns all 16 WebP pieces in a single compressed JSON response (<20KB).
- * Eliminates 16 concurrent HTTP connections and database connection saturation on mobile.
+ * Returns all puzzle pieces in a single compressed JSON response (<20KB).
+ * Dynamically slices from original.webp if pre-sliced assets do not match grid dimensions.
  */
 export async function GET(
   req: Request,
@@ -53,9 +53,11 @@ export async function GET(
       );
     }
 
-    // 1. Verify player session and determine active puzzle image
+    // 1. Verify player session and determine active puzzle image & dimensions
     let slug: string | null = null;
     let total = 9;
+    let cols = 3;
+    let rows = 3;
 
     // Check in-process lobby first (0ms)
     const localLobby = (lobbyRepo as any).processLobbies?.get(code);
@@ -70,6 +72,8 @@ export async function GET(
         const img = localLobby.memory?.image;
         slug = img?.slug ?? img?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
         total = pieceCountFromLobby(localLobby);
+        cols = Number(localLobby.gridCols ?? 3);
+        rows = Number(localLobby.gridRows ?? 3);
       }
     }
 
@@ -105,6 +109,8 @@ export async function GET(
       }
       slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       total = pieceCountFromLobby(lobby);
+      cols = Number(lobby.gridCols ?? 3);
+      rows = Number(lobby.gridRows ?? 3);
     }
 
     if (!slug) {
@@ -117,7 +123,7 @@ export async function GET(
     // 2. Fetch pre-sliced pieces from embedded bundle (0ms)
     let pieces = selectRequiredPieces(getAllPiecesForSlug(slug), total);
 
-    // Fallback: If not in embedded bundle, fetch from Supabase Storage
+    // 3. Fallback: If not in embedded bundle, fetch pre-sliced from Supabase Storage
     if (!pieces) {
       pieces = {};
       const fetches = Array.from({ length: total }, async (_, pieceId) => {
@@ -132,6 +138,48 @@ export async function GET(
         }
       });
       await Promise.all(fetches);
+    }
+
+    // 4. Dynamic Slicing Fallback: If pre-sliced tiles do not cover all required pieces (e.g. 12 pieces)
+    if (Object.keys(pieces).length < total) {
+      try {
+        const { data: origData } = await supabaseAdmin.storage
+          .from("puzzle-images")
+          .download(`${slug}/original.webp`);
+        if (origData) {
+          const origBuf = Buffer.from(await origData.arrayBuffer());
+          const sharp = (await import("sharp")).default;
+          const meta = await sharp(origBuf).metadata();
+          const width = meta.width || 800;
+          const height = meta.height || 800;
+          const tileWidth = Math.floor(width / cols);
+          const tileHeight = Math.floor(height / rows);
+
+          const sliceTasks: Promise<void>[] = [];
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const pieceId = r * cols + c;
+              if (pieces[pieceId]) continue;
+              const left = c * tileWidth;
+              const top = r * tileHeight;
+              const extractWidth = c === cols - 1 ? width - left : tileWidth;
+              const extractHeight = r === rows - 1 ? height - top : tileHeight;
+              sliceTasks.push(
+                sharp(origBuf)
+                  .extract({ left, top, width: extractWidth, height: extractHeight })
+                  .webp({ quality: 85 })
+                  .toBuffer()
+                  .then((b) => {
+                    pieces![pieceId] = `data:image/webp;base64,${b.toString("base64")}`;
+                  }),
+              );
+            }
+          }
+          await Promise.all(sliceTasks);
+        }
+      } catch (sliceErr) {
+        console.error("[DYNAMIC_SLICE_ERR]", sliceErr);
+      }
     }
 
     return Response.json(

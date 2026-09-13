@@ -96,7 +96,7 @@ async function claimClientAction(
   code: string,
   lobby: Lobby,
   playerId: string,
-  actionType: "SWAP" | "COMPLETE",
+  actionType: "SWAP" | "COMPLETE" | "BEGIN_PUZZLE",
   clientGameId?: string | null,
   actionId?: string,
 ): Promise<boolean> {
@@ -339,6 +339,26 @@ export const lobbyService = {
   async getLobby(code: string): Promise<Lobby> {
     const lobby = await lobbyRepo.getByCode(code);
     if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
+
+    const now = Date.now();
+    if (
+      lobby.status === GameState.MEMORY &&
+      lobby.memory?.endsAt &&
+      now >= lobby.memory.endsAt
+    ) {
+      await gameService.beginPuzzle(code);
+      return (await lobbyRepo.getByCode(code)) ?? lobby;
+    }
+
+    if (
+      lobby.status === GameState.PUZZLE &&
+      lobby.puzzleEndsAt &&
+      now >= lobby.puzzleEndsAt
+    ) {
+      await gameService.handlePuzzleTimeout(code);
+      return (await lobbyRepo.getByCode(code)) ?? lobby;
+    }
+
     return lobby;
   },
 
@@ -643,8 +663,8 @@ function resultPayload(lobby: Lobby) {
     finishedAt: lobby.finishedAt,
     durationMs:
       lobby.finishedAt && lobby.puzzleStartedAt
-        ? lobby.finishedAt - lobby.puzzleStartedAt
-        : null,
+        ? (timeExpired ? Math.min(lobby.finishedAt - lobby.puzzleStartedAt, (lobby.puzzleDurationSeconds ?? config.puzzleSeconds) * 1000) : lobby.finishedAt - lobby.puzzleStartedAt)
+        : (timeExpired ? (lobby.puzzleDurationSeconds ?? config.puzzleSeconds) * 1000 : null),
     image: lobby.memory?.image ? { ...lobby.memory.image } : null,
     standings,
   };
@@ -771,15 +791,54 @@ export const gameService = {
 
   /** MEMORY → PUZZLE (also called by the hard server timeout) */
   async beginPuzzle(code: string): Promise<void> {
-    const lobby = await lobbyService.getLobby(code);
+    const lobby = await lobbyRepo.getByCode(code);
+    if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     await withLobbyLock(lobby, async () => {
       if (lobby.status === GameState.PUZZLE) return; // idempotent re-entry
+      if (lobby.status === GameState.FINISHED) return; // cannot move back to PUZZLE if finished
       assertTransition(lobby, GameState.PUZZLE);
       clearLobbyTimers(lobby);
 
       const durationSeconds = config.puzzleSeconds; // exactly 180s (3 minutes)
       const startedAt = Date.now();
       const endsAt = startedAt + durationSeconds * 1000;
+
+      // Atomic conditional update on Supabase games table
+      if (lobby.currentGameId && isSupabaseConfigured()) {
+        const { data: updatedGame, error: updateErr } = await withDbRetry(
+          `atomic_begin_puzzle(${lobby.currentGameId})`,
+          () =>
+            supabaseAdmin
+              .from("games")
+              .update({
+                state: GameState.PUZZLE,
+                puzzle_started_at: new Date(startedAt).toISOString(),
+              })
+              .eq("id", lobby.currentGameId)
+              .eq("state", GameState.MEMORY)
+              .select("id, state"),
+        );
+        if (!updateErr && (!updatedGame || updatedGame.length === 0)) {
+          const { data: currentGame } = await withDbRetry(
+            `check_game_state(${lobby.currentGameId})`,
+            () =>
+              supabaseAdmin
+                .from("games")
+                .select("state")
+                .eq("id", lobby.currentGameId)
+                .maybeSingle(),
+          );
+          const currentState = (currentGame as { state?: string } | null)?.state;
+          if (currentState === GameState.PUZZLE) {
+            lobby.status = GameState.PUZZLE;
+            return;
+          }
+          if (currentState === GameState.FINISHED) {
+            lobby.status = GameState.FINISHED;
+            return;
+          }
+        }
+      }
 
       lobby.status = GameState.PUZZLE;
       lobby.puzzleStartedAt = startedAt;
@@ -795,15 +854,17 @@ export const gameService = {
         cols: lobby.gridCols,
       });
       for (const p of lobby.players) {
-        // Every player receives an independent shuffle.
-        p.puzzle = {
-          board: generateShuffledBoard(total),
-          moves: 0,
-          startedAt: lobby.puzzleStartedAt,
-          completed: false,
-          completedAt: null,
-          eliminated: false,
-        };
+        // Every player receives an independent shuffle if not already initialized.
+        if (!p.puzzle || p.puzzle.board.length !== total) {
+          p.puzzle = {
+            board: generateShuffledBoard(total),
+            moves: 0,
+            startedAt: lobby.puzzleStartedAt,
+            completed: false,
+            completedAt: null,
+            eliminated: false,
+          };
+        }
         p.eliminated = false;
       }
       await lobbyRepo.put(lobby);
@@ -877,7 +938,8 @@ export const gameService = {
 
   /** Authoritative 3-minute expiration: eliminates unsolved players and ends round */
   async handlePuzzleTimeout(code: string): Promise<void> {
-    const lobby = await lobbyService.getLobby(code);
+    const lobby = await lobbyRepo.getByCode(code);
+    if (!lobby) return;
     await withLobbyLock(lobby, async () => {
       if (lobby.status !== GameState.PUZZLE) return;
 
@@ -910,7 +972,7 @@ export const gameService = {
       assertTransition(lobby, GameState.FINISHED);
       lobby.status = GameState.FINISHED;
       lobby.winnerId = null; // No winner if 3 minutes expire without solution
-      lobby.finishedAt = Date.now();
+      lobby.finishedAt = lobby.puzzleEndsAt ? Math.min(Date.now(), lobby.puzzleEndsAt) : Date.now();
 
       await lobbyRepo.put(lobby);
 
@@ -933,9 +995,16 @@ export const gameService = {
     to: number,
     clientGameId?: string | null,
     actionId?: string,
-  ): Promise<void> {
+  ): Promise<{
+    gameId: string | null;
+    board: number[];
+    moves: number;
+    correctSlots: boolean[];
+    completed: boolean;
+    status: GameState;
+  }> {
     const lobby = await lobbyService.getLobby(code);
-    await withLobbyLock(lobby, async () => {
+    return await withLobbyLock(lobby, async () => {
       const player = findPlayer(lobby, playerId);
       if (!player) throw new GameError("NOT_FOUND", "Player not found.", 404);
       if (!safeEqual(token, player.token)) {
@@ -949,7 +1018,16 @@ export const gameService = {
         clientGameId,
         actionId,
       );
-      if (!claimed) return;
+      if (!claimed) {
+        return {
+          gameId: lobby.currentGameId ?? null,
+          board: player.puzzle?.board ?? [],
+          moves: player.puzzle?.moves ?? 0,
+          correctSlots: player.puzzle ? correctSlots(player.puzzle.board) : [],
+          completed: player.puzzle?.completed ?? false,
+          status: lobby.status,
+        };
+      }
       if (lobby.status !== GameState.PUZZLE) {
         throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
       }
@@ -973,7 +1051,16 @@ export const gameService = {
       if (!validateIndex(from, total) || !validateIndex(to, total)) {
         throw new GameError("BAD_REQUEST", "Invalid puzzle index.", 422);
       }
-      if (from === to) return; // no-op tap, ignore
+      if (from === to) {
+        return {
+          gameId,
+          board: puzzle.board,
+          moves: puzzle.moves,
+          correctSlots: correctSlots(puzzle.board),
+          completed: puzzle.completed,
+          status: lobby.status,
+        };
+      }
       console.log("[ACTION_ACCEPTED]", {
         actionId: actionId ?? null,
         gameId,
@@ -1030,7 +1117,14 @@ export const gameService = {
           ),
         );
         await gameService.finish(lobby, player);
-        return;
+        return {
+          gameId,
+          board: puzzle.board,
+          moves: puzzle.moves,
+          correctSlots: correctSlots(puzzle.board),
+          completed: true,
+          status: lobby.status,
+        };
       }
 
       await lobbyRepo.put(lobby);
@@ -1063,6 +1157,15 @@ export const gameService = {
           gameId,
         ),
       );
+
+      return {
+        gameId,
+        board: puzzle.board,
+        moves: puzzle.moves,
+        correctSlots: correctSlots(puzzle.board),
+        completed: false,
+        status: lobby.status,
+      };
     });
   },
 

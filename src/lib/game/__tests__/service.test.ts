@@ -244,17 +244,20 @@ describe("moves, validation & winner", () => {
     expect(lobby!.players[0].puzzle?.moves).toBe(1);
     expect(lobby!.players[0].score).toBe(1);
 
-    await expect(
-      gameService.applySwap(
-        setup.code,
-        winner.id,
-        winner.token,
-        0,
-        1,
-        gameId,
-        "swap-action-0001",
-      ),
-    ).resolves.toBeUndefined();
+    const deduped = await gameService.applySwap(
+      setup.code,
+      winner.id,
+      winner.token,
+      0,
+      1,
+      gameId,
+      "swap-action-0001",
+    );
+    expect(deduped).toMatchObject({
+      moves: 1,
+      completed: true,
+      status: GameState.FINISHED,
+    });
 
     lobby = await lobbyRepo.getByCode(setup.code);
     expect(lobby!.players[0].puzzle?.moves).toBe(1);

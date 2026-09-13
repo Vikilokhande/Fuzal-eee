@@ -178,6 +178,11 @@ export class FuzalSocket {
 
     es.onerror = () => {
       if (!this.isCurrent(es, generation)) return;
+      if (this.expectedRotation) {
+        this.closeCurrent("rotation_close");
+        this.scheduleReconnect(0, "stream_end");
+        return;
+      }
       const verifyUrl = this.buildUrl(true);
       this.closeCurrent("error");
       logRealtime("SSE_FAILURE", {
@@ -265,7 +270,7 @@ export class FuzalSocket {
     if (this.closedByUser || this.state === "SESSION_EXPIRED") return;
     if (this.reconnectTimer) return;
 
-    const isExpectedRotation = reason === "stream_end";
+    const isExpectedRotation = reason === "stream_end" || this.expectedRotation;
     if (!isExpectedRotation) {
       this.expectedRotation = false;
       this.retries += 1;

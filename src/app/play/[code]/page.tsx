@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { useFuzalGame, formatClock } from "@/lib/fuzal/useFuzalGame";
 import { sessionStore, type JoinedPlayer } from "@/lib/fuzal/api";
 import { Wordmark } from "@/components/Brand";
@@ -18,29 +18,35 @@ interface Session {
 export default function PlayerGamePage() {
   const params = useParams<{ code: string }>();
   const code = String(params.code).toUpperCase();
-  const search = useSearchParams();
   const router = useRouter();
-  const [session, setSession] = useState<Session | null>(null);
-  const [badSession, setBadSession] = useState(false);
 
-  // Accept session via query string (from join), persist it, clean the URL.
-  useEffect(() => {
-    const p = search.get("p");
-    const t = search.get("t");
-    const n = search.get("n");
+  const [session] = useState<Session | null>(() => {
+    if (typeof window === "undefined") return null;
+    const sp = new URLSearchParams(window.location.search);
+    const p = sp.get("p");
+    const t = sp.get("t");
+    const n = sp.get("n");
     if (p && t && n) {
       const s: Session = {
         player: { id: p, token: t, name: n, score: 0, slot: 0 },
       };
       sessionStore.set(`player:${code}`, s);
-      setSession(s);
       window.history.replaceState(null, "", `/play/${code}`);
-      return;
+      return s;
     }
+    return sessionStore.get<Session>(`player:${code}`);
+  });
+
+  const [badSession] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const sp = new URLSearchParams(window.location.search);
+    const p = sp.get("p");
+    const t = sp.get("t");
+    const n = sp.get("n");
+    if (p && t && n) return false;
     const stored = sessionStore.get<Session>(`player:${code}`);
-    if (stored) setSession(stored);
-    else setBadSession(true);
-  }, [code, search]);
+    return !stored?.player?.token;
+  });
 
   const game = useFuzalGame(
     session
@@ -158,7 +164,7 @@ export default function PlayerGamePage() {
           result={
             state.result ?? {
               winner: null,
-              finishedAt: Date.now(),
+              finishedAt: state.serverNow ?? 0,
               durationMs: 0,
               image: state.image,
               standings: state.players.map((p) => ({

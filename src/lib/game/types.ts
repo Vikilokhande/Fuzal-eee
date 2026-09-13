@@ -191,9 +191,16 @@ export const playAgainAction = actionBase.extend({
 export const backToLobbyAction = actionBase.extend({
   type: z.literal("BACK_TO_LOBBY"),
 });
+export const beginPuzzleAction = z.object({
+  type: z.literal("BEGIN_PUZZLE"),
+  token: z.string().optional(),
+  playerId: z.string().optional(),
+  ...clientActionFields,
+});
 
 export const actionSchema = z.union([
   startGameAction,
+  beginPuzzleAction,
   swapAction,
   completeAction,
   playAgainAction,
