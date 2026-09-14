@@ -5,6 +5,8 @@ import { getHostPuzzles, uploadPuzzleImage } from "@/lib/fuzal/api";
 import type { PuzzleImageDef } from "@/lib/game/types";
 import { GameBadge } from "@/components/game/GameBadge";
 
+type UploadStage = "UPLOADING" | "PROCESSING" | "GENERATING PIECES" | "READY" | "FAILED" | null;
+
 export function PuzzleLibraryTab({
   onUsePuzzle,
 }: {
@@ -20,7 +22,7 @@ export function PuzzleLibraryTab({
   const [uploadPreview, setUploadPreview] = useState<string | null>(null);
   const [puzzleName, setPuzzleName] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [uploadStage, setUploadStage] = useState<UploadStage>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
 
   // Preview modal
@@ -59,30 +61,33 @@ export function PuzzleLibraryTab({
 
     setUploading(true);
     setUploadErr(null);
-    setUploadStatus("Uploading master original to Supabase Storage…");
+    setUploadStage("UPLOADING");
 
     try {
       const formData = new FormData();
       formData.append("file", uploadFile);
       formData.append("name", puzzleName.trim());
 
-      setUploadStatus("Generating 2×2 through 8×8 WebP puzzle piece slices…");
+      // Server will validate and generate slices across supported grids
+      setUploadStage("PROCESSING");
       const res = await uploadPuzzleImage(formData);
 
       if (res.ok) {
-        setUploadStatus("✓ PUZZLE READY! Pieces uploaded.");
+        setUploadStage("READY");
         setTimeout(() => {
           setShowUpload(false);
           setUploadFile(null);
           setUploadPreview(null);
           setPuzzleName("");
-          setUploadStatus(null);
+          setUploadStage(null);
           void fetchPuzzles();
         }, 1200);
+      } else {
+        throw new Error(res.message || "Failed to process puzzle image");
       }
     } catch (err: any) {
+      setUploadStage("FAILED");
       setUploadErr(err?.message ?? "Failed to upload image");
-      setUploadStatus(null);
     } finally {
       setUploading(false);
     }
@@ -101,21 +106,32 @@ export function PuzzleLibraryTab({
             Puzzle Image Management
           </h2>
           <p className="text-xs sm:text-sm text-indigo-200/70">
-            Pre-generated WebP image library. All images support 2×2 up to 8×8 with 0ms runtime overhead.
+            Pre-sliced square arena puzzles supporting 2×2 through 8×8 match formats.
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setShowUpload(true)}
-          className="btn-primary px-4 py-2.5 text-xs sm:text-sm font-black flex items-center gap-2"
-        >
-          <span>➕</span>
-          <span>Upload Image</span>
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={fetchPuzzles}
+            disabled={loading}
+            className="btn-secondary px-3.5 py-2 text-xs font-bold flex items-center gap-1.5"
+          >
+            <span>🔄</span>
+            <span>Refresh</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowUpload(true)}
+            className="btn-primary px-4 py-2 text-xs sm:text-sm font-black flex items-center gap-2"
+          >
+            <span>➕</span>
+            <span>Upload New Puzzle</span>
+          </button>
+        </div>
       </div>
 
-      {/* Library Grid */}
+      {/* Grid of Puzzles */}
       {loading ? (
         <div className="flex flex-col items-center justify-center py-16 gap-3">
           <span className="h-3 w-3 animate-ping rounded-full bg-cyan-400" />
@@ -124,8 +140,18 @@ export function PuzzleLibraryTab({
           </p>
         </div>
       ) : error ? (
-        <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 p-4 text-center text-xs text-rose-300">
-          {error}
+        <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-8 text-center flex flex-col items-center gap-3">
+          <span className="text-3xl">⚠️</span>
+          <p className="text-base font-bold text-white uppercase tracking-wider">DATA UNAVAILABLE</p>
+          <p className="text-xs text-rose-300 max-w-sm">Unable to load puzzle library. {error}</p>
+          <button
+            type="button"
+            onClick={fetchPuzzles}
+            className="btn-secondary mt-2 px-5 py-2 text-xs font-bold flex items-center gap-2"
+          >
+            <span>🔄</span>
+            <span>RETRY</span>
+          </button>
         </div>
       ) : puzzles.length === 0 ? (
         <div className="glass p-12 text-center flex flex-col items-center gap-3">
@@ -158,11 +184,12 @@ export function PuzzleLibraryTab({
                 <img
                   src={p.url}
                   alt={p.name}
-                  loading="lazy"
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                  className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-300"
                 />
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
-                  <span className="text-xs font-bold text-cyan-300">Click to Preview</span>
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
+                  <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                    <span>🔍</span> Click to inspect
+                  </span>
                 </div>
               </div>
 
@@ -170,23 +197,25 @@ export function PuzzleLibraryTab({
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between">
                   <h4 className="font-display text-base font-bold text-white truncate">{p.name}</h4>
-                  <span className="font-mono text-[10px] text-indigo-200/50">{p.createdAt}</span>
+                  <span className="text-[11px] font-mono text-indigo-200/50">{p.createdAt}</span>
                 </div>
 
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-indigo-200/60 font-mono text-[11px]">
-                    Used in {p.usageCount} games
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <GameBadge variant="grid" className="text-[10px] px-2 py-0.5">
+                    2×2 — 8×8
+                  </GameBadge>
+                  <span className="text-[11px] font-mono text-indigo-200/60">
+                    Used in {p.usageCount} {p.usageCount === 1 ? "game" : "games"}
                   </span>
-                  <GameBadge variant="grid">2×2 to 8×8 Ready</GameBadge>
                 </div>
               </div>
 
-              {/* Actions */}
-              <div className="flex items-center gap-2 pt-1 border-t border-white/5">
+              {/* Action Buttons */}
+              <div className="flex items-center gap-2 pt-1 border-t border-white/10">
                 <button
                   type="button"
                   onClick={() => setPreviewPuzzle(p)}
-                  className="btn-secondary flex-1 py-1.5 text-xs font-bold"
+                  className="btn-secondary flex-1 py-2 text-xs font-bold"
                 >
                   Preview
                 </button>
@@ -194,7 +223,7 @@ export function PuzzleLibraryTab({
                   <button
                     type="button"
                     onClick={() => onUsePuzzle(p)}
-                    className="btn-primary flex-1 py-1.5 text-xs font-bold"
+                    className="btn-primary flex-1 py-2 text-xs font-bold"
                   >
                     Select
                   </button>
@@ -205,66 +234,67 @@ export function PuzzleLibraryTab({
         </div>
       )}
 
-      {/* Upload Image Modal */}
+      {/* Upload Puzzle Modal */}
       {showUpload && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="glass max-w-lg w-full p-6 sm:p-8 flex flex-col gap-5 border border-cyan-400/40 shadow-2xl my-auto">
-            <div className="flex items-start justify-between">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="glass max-w-lg w-full p-6 sm:p-8 flex flex-col gap-5 border border-cyan-400/40 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div>
-                <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">
-                  New Puzzle Image
-                </span>
+                <GameBadge variant="ready">UPLOAD ASSET</GameBadge>
                 <h3 className="font-display text-xl font-black text-white uppercase mt-0.5">
-                  Upload &amp; Slice Puzzle
+                  Upload Custom Puzzle
                 </h3>
               </div>
               <button
                 type="button"
                 disabled={uploading}
-                onClick={() => {
-                  setShowUpload(false);
-                  setUploadFile(null);
-                  setUploadPreview(null);
-                }}
-                className="text-white/60 hover:text-white text-xl p-1 font-bold"
+                onClick={() => setShowUpload(false)}
+                className="text-white/40 hover:text-white text-lg font-bold"
               >
                 ✕
               </button>
             </div>
 
             <form onSubmit={handleUploadSubmit} className="flex flex-col gap-4">
-              {/* Drop / Select File Box */}
-              <div className="relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/20 hover:border-cyan-400/60 bg-slate-900/60 p-6 text-center cursor-pointer transition-colors">
+              {/* File Drop Area */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-bold text-indigo-200/70 uppercase">
+                  Select Source Image (PNG, JPG, WebP)
+                </label>
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
-                  onChange={handleFileChange}
                   disabled={uploading}
-                  className="absolute inset-0 opacity-0 cursor-pointer"
+                  onChange={handleFileChange}
+                  className="text-xs text-indigo-200/80 file:mr-3 file:rounded-xl file:border-0 file:bg-cyan-500/20 file:px-4 file:py-2 file:text-xs file:font-bold file:text-cyan-300 hover:file:bg-cyan-500/30 cursor-pointer"
                 />
-                {uploadPreview ? (
-                  <div className="flex flex-col items-center gap-2">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={uploadPreview}
-                      alt="Preview"
-                      className="h-36 w-36 rounded-xl object-cover border border-cyan-400/40 shadow-lg"
-                    />
-                    <span className="text-xs text-cyan-300 font-bold">Click or drop to change</span>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-2">
-                    <span className="text-3xl">📁</span>
-                    <p className="text-xs font-bold text-white">Click or Drag Image Here</p>
-                    <p className="text-[11px] text-indigo-200/50">PNG, JPEG, or WebP up to 5MB (Square 1:1 recommended)</p>
-                  </div>
-                )}
               </div>
 
+              {/* Image Preview */}
+              {uploadPreview && (
+                <div className="flex items-center gap-4 p-3 rounded-2xl bg-slate-900/60 border border-white/10">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={uploadPreview}
+                    alt="Upload Preview"
+                    className="h-20 w-20 rounded-xl object-cover border border-white/10"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold text-white truncate">{uploadFile?.name}</p>
+                    <p className="text-[11px] font-mono text-indigo-200/60">
+                      {uploadFile ? `${Math.round(uploadFile.size / 1024)} KB` : ""}
+                    </p>
+                    <span className="text-[10px] text-emerald-400 font-semibold">
+                      ✓ Supported for automatic 2×2–8×8 slicing
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Puzzle Name Input */}
-              <div className="flex flex-col gap-1.5 text-left">
-                <label className="text-xs font-extrabold uppercase tracking-wider text-indigo-200/70">
-                  Puzzle Title
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-bold text-indigo-200/70 uppercase">
+                  Puzzle Display Name
                 </label>
                 <input
                   type="text"
@@ -277,17 +307,31 @@ export function PuzzleLibraryTab({
                 />
               </div>
 
-              {/* Status / Processing Indicator */}
-              {uploadStatus && (
-                <div className="rounded-xl border border-cyan-400/40 bg-cyan-500/10 p-3 text-xs font-bold text-cyan-300 flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-cyan-400 animate-ping" />
-                  <span>{uploadStatus}</span>
-                </div>
-              )}
-
-              {uploadErr && (
-                <div className="rounded-xl border border-rose-500/40 bg-rose-500/20 p-3 text-xs text-rose-300 font-bold">
-                  {uploadErr}
+              {/* Allowed Upload Status States: UPLOADING -> PROCESSING -> GENERATING PIECES -> READY -> FAILED */}
+              {uploadStage && (
+                <div
+                  className={`rounded-xl border p-3 text-xs font-bold flex items-center gap-2.5 ${
+                    uploadStage === "FAILED"
+                      ? "border-rose-500/40 bg-rose-500/20 text-rose-300"
+                      : uploadStage === "READY"
+                        ? "border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+                        : "border-cyan-400/40 bg-cyan-500/10 text-cyan-300"
+                  }`}
+                >
+                  {uploadStage === "FAILED" ? (
+                    <span>✕</span>
+                  ) : uploadStage === "READY" ? (
+                    <span>✓</span>
+                  ) : (
+                    <span className="h-2.5 w-2.5 rounded-full bg-cyan-400 animate-ping" />
+                  )}
+                  <span className="uppercase tracking-wider">
+                    {uploadStage === "UPLOADING" && "UPLOADING FILE…"}
+                    {uploadStage === "PROCESSING" && "PROCESSING MASTER WEBP…"}
+                    {uploadStage === "GENERATING PIECES" && "GENERATING PIECES (2×2–8×8)…"}
+                    {uploadStage === "READY" && "READY — PUZZLE PIECES GENERATED"}
+                    {uploadStage === "FAILED" && `FAILED: ${uploadErr || "Upload failed"}`}
+                  </span>
                 </div>
               )}
 
@@ -308,7 +352,7 @@ export function PuzzleLibraryTab({
                   {uploading ? (
                     <>
                       <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
-                      <span>Processing…</span>
+                      <span>{uploadStage || "PROCESSING…"}</span>
                     </>
                   ) : (
                     <span>Upload &amp; Slice</span>

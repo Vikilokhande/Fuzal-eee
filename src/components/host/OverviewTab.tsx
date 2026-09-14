@@ -23,7 +23,7 @@ export function OverviewTab({
       const res = await getHostOverview();
       setData(res);
     } catch (err: any) {
-      setError(err?.message ?? "Failed to load overview data");
+      setError(err?.message ?? "Unable to load overview analytics.");
     } finally {
       setLoading(false);
     }
@@ -46,7 +46,7 @@ export function OverviewTab({
             Event Operations Overview
           </h2>
           <p className="text-xs sm:text-sm text-indigo-200/70">
-            Real-time tournament stats, historical games, and overall solve metrics.
+            Authoritative tournament metrics, historical rounds, and real solve records.
           </p>
         </div>
 
@@ -74,10 +74,10 @@ export function OverviewTab({
       {/* KPI Cards Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {[
-          { label: "Total Games", value: data?.totalGames ?? "—", icon: "🎮", color: "text-cyan-300" },
-          { label: "Total Players", value: data?.totalPlayers ?? "—", icon: "👥", color: "text-purple-300" },
-          { label: "Completions", value: data?.totalCompletions ?? "—", icon: "🏆", color: "text-emerald-400" },
-          { label: "Active Lobbies", value: data?.activeLobbies ?? 0, icon: "⚡", color: "text-amber-300" },
+          { label: "Total Games", value: data?.totalGames ?? (error ? "—" : 0), icon: "🎮", color: "text-cyan-300" },
+          { label: "Total Players", value: data?.totalPlayers ?? (error ? "—" : 0), icon: "👥", color: "text-purple-300" },
+          { label: "Completions", value: data?.totalCompletions ?? (error ? "—" : 0), icon: "🏆", color: "text-emerald-400" },
+          { label: "Active Lobbies", value: data?.activeLobbies ?? (error ? "—" : 0), icon: "⚡", color: "text-amber-300" },
           { label: "Avg Solve Time", value: data?.avgSolveTimeFormatted ?? "—", icon: "⏱️", color: "text-fuchsia-300" },
           { label: "Best Solve Time", value: data?.bestSolveTimeFormatted ?? "—", icon: "⚡", color: "text-yellow-300" },
         ].map((kpi) => (
@@ -128,15 +128,25 @@ export function OverviewTab({
             </p>
           </div>
         ) : error ? (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 p-4 text-center text-xs text-rose-300">
-            {error}
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-8 text-center flex flex-col items-center gap-3">
+            <span className="text-3xl">⚠️</span>
+            <p className="text-base font-bold text-white uppercase tracking-wider">DATA UNAVAILABLE</p>
+            <p className="text-xs text-rose-300 max-w-sm">Unable to load overview analytics. {error}</p>
+            <button
+              type="button"
+              onClick={fetchOverview}
+              className="btn-secondary mt-2 px-5 py-2 text-xs font-bold flex items-center gap-2"
+            >
+              <span>🔄</span>
+              <span>RETRY</span>
+            </button>
           </div>
         ) : !data?.recentGames || data.recentGames.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-white/15 p-8 text-center flex flex-col items-center gap-2">
             <span className="text-3xl">🎮</span>
             <p className="text-sm font-bold text-white">No Completed Games Recorded</p>
             <p className="text-xs text-indigo-200/60">
-              Launch a live arena lobby and complete matches to populate analytics.
+              Launch an arena match to record completed games and populate analytics.
             </p>
           </div>
         ) : (

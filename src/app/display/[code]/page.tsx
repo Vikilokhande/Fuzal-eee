@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useParams } from "next/navigation";
-import { useFuzalGame, formatClock } from "@/lib/fuzal/useFuzalGame";
+import { useFuzalGame } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import { Wordmark, Logo } from "@/components/Brand";
 import { QRCodeSVG } from "qrcode.react";
 import { joinUrlFor } from "@/lib/fuzal/api";

@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import type { ConnectionState } from "@/lib/fuzal/realtime";
 
 export function PuzzleHUD({

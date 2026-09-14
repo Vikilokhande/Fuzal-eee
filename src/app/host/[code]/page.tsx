@@ -2,7 +2,8 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useFuzalGame, formatClock } from "@/lib/fuzal/useFuzalGame";
+import { useFuzalGame } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import { createLobby, sessionStore } from "@/lib/fuzal/api";
 import { Wordmark, Logo } from "@/components/Brand";
 import { ConnBanner } from "@/components/ConnBanner";

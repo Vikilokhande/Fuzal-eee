@@ -157,8 +157,18 @@ export function HistoryTab() {
             </p>
           </div>
         ) : error ? (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 p-4 text-center text-xs text-rose-300">
-            {error}
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-8 text-center flex flex-col items-center gap-3">
+            <span className="text-3xl">⚠️</span>
+            <p className="text-base font-bold text-white uppercase tracking-wider">DATA UNAVAILABLE</p>
+            <p className="text-xs text-rose-300 max-w-sm">Unable to load game history. {error}</p>
+            <button
+              type="button"
+              onClick={() => void fetchHistory()}
+              className="btn-secondary mt-2 px-5 py-2 text-xs font-bold flex items-center gap-2"
+            >
+              <span>🔄</span>
+              <span>RETRY</span>
+            </button>
           </div>
         ) : games.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-white/15 p-8 text-center flex flex-col items-center gap-2">

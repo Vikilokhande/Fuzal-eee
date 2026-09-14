@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import type { PlayerView, ProgressView } from "@/lib/fuzal/useFuzalGame";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import { Avatar } from "@/components/PlayerList";
 import { GameBadge } from "@/components/game/GameBadge";
 

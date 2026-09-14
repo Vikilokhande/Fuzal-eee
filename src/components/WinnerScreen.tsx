@@ -5,7 +5,7 @@ import { Confetti } from "./Confetti";
 import { Avatar } from "./PlayerList";
 import { Wordmark, Logo } from "./Brand";
 import type { ResultView } from "@/lib/fuzal/useFuzalGame";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import { GameBadge } from "./game/GameBadge";
 
 export function WinnerScreen({

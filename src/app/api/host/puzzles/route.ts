@@ -9,10 +9,18 @@ const supabaseUrl =
   "https://dewdcxssvkvbgyyenmmu.supabase.co";
 
 export async function GET(req: NextRequest) {
+  const requestId = req.headers.get("x-request-id") || crypto.randomUUID();
+  const startTime = performance.now();
+
+  console.log(`[HOST_PUZZLES_START] requestId=${requestId} method=GET endpoint=/api/host/puzzles`);
+
   try {
     if (!isSupabaseConfigured()) {
+      console.warn(`[HOST_PUZZLES_DB] requestId=${requestId} Supabase not configured`);
       return NextResponse.json({ puzzles: [] });
     }
+
+    console.log(`[HOST_PUZZLES_DB] requestId=${requestId} operation=query_puzzles`);
 
     // 1. Fetch images from database
     const { data: imgRows, error: imgErr } = await supabaseAdmin
@@ -21,8 +29,8 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: false });
 
     if (imgErr) {
-      console.error("[PUZZLES_LIST_ERR]", imgErr);
-      return NextResponse.json({ error: imgErr.message }, { status: 500 });
+      console.error(`[HOST_PUZZLES_DB_ERROR] requestId=${requestId} query=puzzle_images error=${imgErr.message}`);
+      return NextResponse.json({ error: "Failed to list puzzles from database" }, { status: 500 });
     }
 
     // 2. Fetch usage counts from games table
@@ -60,11 +68,15 @@ export async function GET(req: NextRequest) {
       };
     });
 
+    const duration = Math.round(performance.now() - startTime);
+    console.log(`[HOST_PUZZLES_SUCCESS] requestId=${requestId} duration=${duration}ms count=${puzzles.length}`);
+
     return NextResponse.json({ puzzles });
   } catch (err: any) {
-    console.error("[PUZZLES_GET_ERR]", err);
+    const duration = Math.round(performance.now() - startTime);
+    console.error(`[HOST_PUZZLES_ERROR] requestId=${requestId} duration=${duration}ms error=${err?.message}`);
     return NextResponse.json(
-      { error: "INTERNAL_ERROR", message: err?.message ?? "Failed to list puzzles" },
+      { error: "INTERNAL_ERROR", message: "Failed to list puzzles" },
       { status: 500 },
     );
   }

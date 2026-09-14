@@ -1,13 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import type { HostAnalyticsOverview, GameHistoryItem } from "@/lib/game/types";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const requestId = req.headers.get("x-request-id") || crypto.randomUUID();
+  const startTime = performance.now();
+
+  console.log(`[HOST_OVERVIEW_START] requestId=${requestId} method=GET endpoint=/api/host/overview`);
+
   try {
     if (!isSupabaseConfigured()) {
+      console.warn(`[HOST_OVERVIEW_DB] requestId=${requestId} Supabase not configured, returning empty defaults`);
       return NextResponse.json(
         {
           totalGames: 0,
@@ -23,30 +29,48 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    console.log(`[HOST_OVERVIEW_DB] requestId=${requestId} operation=aggregate_metrics_start`);
+
     // 1. Total games count
-    const { count: totalGames } = await supabaseAdmin
+    const { count: totalGames, error: tgErr } = await supabaseAdmin
       .from("games")
       .select("id", { count: "exact", head: true });
 
+    if (tgErr) {
+      console.error(`[HOST_OVERVIEW_DB_ERROR] requestId=${requestId} query=totalGames error=${tgErr.message}`);
+    }
+
     // 2. Total players count
-    const { count: totalPlayers } = await supabaseAdmin
+    const { count: totalPlayers, error: tpErr } = await supabaseAdmin
       .from("players")
       .select("id", { count: "exact", head: true });
 
+    if (tpErr) {
+      console.error(`[HOST_OVERVIEW_DB_ERROR] requestId=${requestId} query=totalPlayers error=${tpErr.message}`);
+    }
+
     // 3. Total completions
-    const { count: totalCompletions } = await supabaseAdmin
+    const { count: totalCompletions, error: tcErr } = await supabaseAdmin
       .from("game_players")
       .select("id", { count: "exact", head: true })
       .eq("completed", true);
 
+    if (tcErr) {
+      console.error(`[HOST_OVERVIEW_DB_ERROR] requestId=${requestId} query=totalCompletions error=${tcErr.message}`);
+    }
+
     // 4. Active lobbies
-    const { count: activeLobbies } = await supabaseAdmin
+    const { count: activeLobbies, error: alErr } = await supabaseAdmin
       .from("lobbies")
       .select("id", { count: "exact", head: true })
       .in("status", ["LOBBY", "MEMORY", "PUZZLE"]);
 
+    if (alErr) {
+      console.error(`[HOST_OVERVIEW_DB_ERROR] requestId=${requestId} query=activeLobbies error=${alErr.message}`);
+    }
+
     // 5. Recent finished games
-    const { data: recentRows } = await supabaseAdmin
+    const { data: recentRows, error: rgErr } = await supabaseAdmin
       .from("games")
       .select(`
         id,
@@ -65,6 +89,10 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: false })
       .limit(10);
 
+    if (rgErr) {
+      console.error(`[HOST_OVERVIEW_DB_ERROR] requestId=${requestId} query=recentGames error=${rgErr.message}`);
+    }
+
     // 6. Calculate best and avg solve times from completed games
     let bestSolveTimeMs: number | null = null;
     let totalSolveTimeMs = 0;
@@ -73,12 +101,15 @@ export async function GET(req: NextRequest) {
     const recentGames: GameHistoryItem[] = [];
 
     if (recentRows && recentRows.length > 0) {
-      // Also fetch player counts for these games
       const gameIds = recentRows.map((r: any) => r.id);
-      const { data: gpRows } = await supabaseAdmin
+      const { data: gpRows, error: gpErr } = await supabaseAdmin
         .from("game_players")
         .select("game_id, moves, completed, started_at, completed_at, player_id")
         .in("game_id", gameIds);
+
+      if (gpErr) {
+        console.error(`[HOST_OVERVIEW_DB_ERROR] requestId=${requestId} query=game_players error=${gpErr.message}`);
+      }
 
       const gpByGame = new Map<string, any[]>();
       if (gpRows) {
@@ -152,17 +183,23 @@ export async function GET(req: NextRequest) {
       totalCompletions: totalCompletions ?? 0,
       activeLobbies: activeLobbies ?? 0,
       avgSolveTimeMs,
-      avgSolveTimeFormatted: avgSolveTimeMs ? formatClock(avgSolveTimeMs) : "01:42",
+      avgSolveTimeFormatted: avgSolveTimeMs ? formatClock(avgSolveTimeMs) : "—",
       bestSolveTimeMs,
-      bestSolveTimeFormatted: bestSolveTimeMs ? formatClock(bestSolveTimeMs) : "00:23",
+      bestSolveTimeFormatted: bestSolveTimeMs ? formatClock(bestSolveTimeMs) : "—",
       recentGames,
     };
 
+    const duration = Math.round(performance.now() - startTime);
+    console.log(
+      `[HOST_OVERVIEW_SUCCESS] requestId=${requestId} duration=${duration}ms totalGames=${payload.totalGames} totalPlayers=${payload.totalPlayers} activeLobbies=${payload.activeLobbies}`,
+    );
+
     return NextResponse.json(payload);
   } catch (err: any) {
-    console.error("[HOST_OVERVIEW_ERROR]", err);
+    const duration = Math.round(performance.now() - startTime);
+    console.error(`[HOST_OVERVIEW_ERROR] requestId=${requestId} duration=${duration}ms error=${err?.message}`);
     return NextResponse.json(
-      { error: "INTERNAL_ERROR", message: err?.message ?? "Failed to load overview analytics" },
+      { error: "INTERNAL_ERROR", message: "Failed to load overview analytics" },
       { status: 500 },
     );
   }

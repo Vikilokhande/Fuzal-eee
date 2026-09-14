@@ -3,7 +3,7 @@
 import React from "react";
 import { Wordmark, Logo } from "@/components/Brand";
 import { GameBadge } from "@/components/game/GameBadge";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 
 export function ControlRoomTopBar({
   lobbyCode,

@@ -1,21 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import type { GameHistoryItem } from "@/lib/game/types";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const requestId = req.headers.get("x-request-id") || crypto.randomUUID();
+  const startTime = performance.now();
+
+  console.log(`[HOST_HISTORY_START] requestId=${requestId} method=GET endpoint=/api/host/history`);
+
   try {
     if (!isSupabaseConfigured()) {
-      return NextResponse.json({ games: [], total: 0, page: 1, totalPages: 1 });
+      console.warn(`[HOST_HISTORY_DB] requestId=${requestId} Supabase not configured`);
+      return NextResponse.json({ games: [], total: 0, page: 1, pageSize: 15, limit: 15, totalPages: 1 });
     }
 
     const { searchParams } = new URL(req.url);
     const page = Math.max(1, Number(searchParams.get("page") ?? 1));
     const limit = Math.min(
       100,
-      Math.max(1, Number(searchParams.get("pageSize") ?? searchParams.get("limit") ?? 20)),
+      Math.max(1, Number(searchParams.get("pageSize") ?? searchParams.get("limit") ?? 15)),
     );
     const offset = (page - 1) * limit;
 
@@ -23,6 +29,10 @@ export async function GET(req: NextRequest) {
     const statusFilter = searchParams.get("status");
     const search = searchParams.get("search")?.trim().toLowerCase();
     const dateRange = searchParams.get("date"); // 'today' | 'week' | 'month' | 'all'
+
+    console.log(
+      `[HOST_HISTORY_DB] requestId=${requestId} operation=query_history page=${page} limit=${limit} grid=${gridFilter ?? "ALL"} status=${statusFilter ?? "ALL"}`,
+    );
 
     let query = supabaseAdmin
       .from("games")
@@ -68,17 +78,21 @@ export async function GET(req: NextRequest) {
       .range(offset, offset + limit - 1);
 
     if (error) {
-      console.error("[HOST_HISTORY_QUERY_ERROR]", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      console.error(`[HOST_HISTORY_DB_ERROR] requestId=${requestId} query=games error=${error.message}`);
+      return NextResponse.json({ error: "Failed to load history from database" }, { status: 500 });
     }
 
     const games: GameHistoryItem[] = [];
     if (rows && rows.length > 0) {
       const gameIds = rows.map((r: any) => r.id);
-      const { data: gpRows } = await supabaseAdmin
+      const { data: gpRows, error: gpErr } = await supabaseAdmin
         .from("game_players")
         .select("game_id, moves, completed, started_at, completed_at, player_id")
         .in("game_id", gameIds);
+
+      if (gpErr) {
+        console.error(`[HOST_HISTORY_DB_ERROR] requestId=${requestId} query=game_players error=${gpErr.message}`);
+      }
 
       const gpByGame = new Map<string, any[]>();
       if (gpRows) {
@@ -148,12 +162,18 @@ export async function GET(req: NextRequest) {
 
     const total = count ?? games.length;
     const totalPages = Math.max(1, Math.ceil(total / limit));
+    const duration = Math.round(performance.now() - startTime);
+
+    console.log(
+      `[HOST_HISTORY_SUCCESS] requestId=${requestId} duration=${duration}ms count=${games.length} total=${total} page=${page}`,
+    );
 
     return NextResponse.json({ games, total, page, pageSize: limit, limit, totalPages });
   } catch (err: any) {
-    console.error("[HOST_HISTORY_ERR]", err);
+    const duration = Math.round(performance.now() - startTime);
+    console.error(`[HOST_HISTORY_ERROR] requestId=${requestId} duration=${duration}ms error=${err?.message}`);
     return NextResponse.json(
-      { error: "INTERNAL_ERROR", message: err?.message ?? "Failed to load history" },
+      { error: "INTERNAL_ERROR", message: "Failed to load history" },
       { status: 500 },
     );
   }

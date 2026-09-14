@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useFuzalGame, formatClock } from "@/lib/fuzal/useFuzalGame";
+import { useFuzalGame } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import { sessionStore, type JoinedPlayer } from "@/lib/fuzal/api";
 import { Wordmark, Logo } from "@/components/Brand";
 import { Avatar } from "@/components/PlayerList";

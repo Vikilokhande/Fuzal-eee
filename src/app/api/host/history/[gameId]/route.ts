@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
-import { formatClock } from "@/lib/fuzal/useFuzalGame";
+import { formatClock } from "@/lib/game/format";
 import type { GameHistoryDetail, HistoricalPlayerParticipation } from "@/lib/game/types";
 
 export const dynamic = "force-dynamic";
@@ -9,15 +9,22 @@ export async function GET(
   req: NextRequest,
   ctx: { params: Promise<{ gameId: string }> },
 ) {
+  const requestId = req.headers.get("x-request-id") || crypto.randomUUID();
+  const startTime = performance.now();
+
   try {
+    const { gameId } = await ctx.params;
+    console.log(`[GAME_DETAIL_START] requestId=${requestId} gameId=${gameId}`);
+
     if (!isSupabaseConfigured()) {
       return NextResponse.json({ error: "DB_NOT_CONFIGURED" }, { status: 503 });
     }
 
-    const { gameId } = await ctx.params;
     if (!gameId) {
       return NextResponse.json({ error: "Missing game ID" }, { status: 400 });
     }
+
+    console.log(`[GAME_DETAIL_DB] requestId=${requestId} operation=query_game_detail gameId=${gameId}`);
 
     const { data: gameRow, error: gErr } = await supabaseAdmin
       .from("games")
@@ -38,12 +45,18 @@ export async function GET(
       .eq("id", gameId)
       .maybeSingle();
 
-    if (gErr || !gameRow) {
+    if (gErr) {
+      console.error(`[GAME_DETAIL_DB_ERROR] requestId=${requestId} query=game error=${gErr.message}`);
+      return NextResponse.json({ error: "Failed to query game details" }, { status: 500 });
+    }
+
+    if (!gameRow) {
+      console.warn(`[GAME_DETAIL_NOT_FOUND] requestId=${requestId} gameId=${gameId}`);
       return NextResponse.json({ error: "NOT_FOUND", message: "Game not found" }, { status: 404 });
     }
 
     // Fetch players and game_players for this game
-    const { data: gpRows } = await supabaseAdmin
+    const { data: gpRows, error: gpErr } = await supabaseAdmin
       .from("game_players")
       .select(`
         id,
@@ -57,6 +70,10 @@ export async function GET(
         players!game_players_player_id_fkey(id, name, slot, score)
       `)
       .eq("game_id", gameId);
+
+    if (gpErr) {
+      console.error(`[GAME_DETAIL_DB_ERROR] requestId=${requestId} query=game_players error=${gpErr.message}`);
+    }
 
     const standings: HistoricalPlayerParticipation[] = [];
 
@@ -139,11 +156,15 @@ export async function GET(
       players: standings,
     };
 
+    const duration = Math.round(performance.now() - startTime);
+    console.log(`[GAME_DETAIL_SUCCESS] requestId=${requestId} gameId=${gameId} duration=${duration}ms standings=${standings.length}`);
+
     return NextResponse.json(detail);
   } catch (err: any) {
-    console.error("[GAME_DETAIL_ERR]", err);
+    const duration = Math.round(performance.now() - startTime);
+    console.error(`[GAME_DETAIL_ERR] requestId=${requestId} duration=${duration}ms error=${err?.message}`);
     return NextResponse.json(
-      { error: "INTERNAL_ERROR", message: err?.message ?? "Failed to load game details" },
+      { error: "INTERNAL_ERROR", message: "Failed to load game details" },
       { status: 500 },
     );
   }
