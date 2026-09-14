@@ -132,7 +132,7 @@ describe("Host Control Room API Endpoints", () => {
       .toBuffer();
 
     const formData = new FormData();
-    const testFile = new File([validPngBuffer], "test-cyber-gem.png", { type: "image/png" });
+    const testFile = new File([new Uint8Array(validPngBuffer)], "test-cyber-gem.png", { type: "image/png" });
     formData.append("file", testFile);
     formData.append("name", "Cyber Gem Test");
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import sharp, { type Metadata } from "sharp";
+import type { Metadata } from "sharp";
 import { supabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/admin";
 import { imageService } from "@/lib/game/imageService";
 import { calculatePieceRect } from "@/lib/game/slicer";
@@ -7,6 +7,17 @@ import type { PuzzleImageDef } from "@/lib/game/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 60;
+
+async function getSharp() {
+  try {
+    const mod = await import("sharp");
+    return (mod.default || mod) as unknown as typeof import("sharp");
+  } catch (err: any) {
+    console.error("[HOST_PUZZLE_UPLOAD_ERROR] Failed to load sharp library:", err?.message || err);
+    throw new Error(`Sharp image processor failed to initialize in runtime: ${err?.message || "native binding missing"}`);
+  }
+}
 
 const BUCKET_NAME = "puzzle-images";
 const TARGET_SIZE = 900;
@@ -90,6 +101,9 @@ export async function POST(req: NextRequest) {
     }
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
+
+    // Obtain Sharp image processor safely
+    const sharp = await getSharp();
 
     // Validate image dimensions via Sharp metadata
     let originalMetadata: Metadata;
