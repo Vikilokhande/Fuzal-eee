@@ -563,4 +563,60 @@ describe("FUZAL Multiplayer Identity & Board Isolation Test Suite", () => {
       }
     });
   });
+
+  // =========================================================================
+  // HOST ACTION IDEMPOTENCY & 409 CONFLICT ELIMINATION
+  // =========================================================================
+  describe("Host Action Idempotency & 409 Conflict Elimination", () => {
+    it("startGame is idempotent and does not throw 409 if called repeatedly or when already started", async () => {
+      const lobby = await lobbyService.createLobby({ gridSize: 3, maxPlayers: 5 });
+      const code = lobby.code;
+      await lobbyService.join(code, "Player One");
+
+      // First call -> Transitions LOBBY -> MEMORY
+      await expect(gameService.startGame(code, lobby.hostToken)).resolves.not.toThrow();
+
+      // Second call (e.g. rapid double-click or latency retry) -> Idempotent, MUST NOT throw 409!
+      await expect(gameService.startGame(code, lobby.hostToken)).resolves.not.toThrow();
+
+      // Transition to PUZZLE
+      await gameService.beginPuzzle(code, true);
+
+      // Third call while in PUZZLE -> Idempotent, MUST NOT throw 409!
+      await expect(gameService.startGame(code, lobby.hostToken)).resolves.not.toThrow();
+    });
+
+    it("beginPuzzle is idempotent and does not throw 409 if invoked while lobby is in LOBBY state", async () => {
+      const lobby = await lobbyService.createLobby({ gridSize: 3, maxPlayers: 5 });
+      const code = lobby.code;
+
+      // In LOBBY state, beginPuzzle MUST NOT throw 409
+      await expect(gameService.beginPuzzle(code, false)).resolves.not.toThrow();
+    });
+
+    it("playAgain and backToLobby are idempotent and do not throw 409 on repeated calls", async () => {
+      const lobby = await lobbyService.createLobby({ gridSize: 3, maxPlayers: 5 });
+      const code = lobby.code;
+      await lobbyService.join(code, "Player One");
+
+      await gameService.startGame(code, lobby.hostToken);
+      await gameService.beginPuzzle(code, true);
+
+      // Solve or timeout to FINISHED
+      await gameService.handlePuzzleTimeout(code);
+
+      // First playAgain -> FINISHED to MEMORY
+      await expect(gameService.playAgain(code, lobby.hostToken)).resolves.not.toThrow();
+
+      // Repeated playAgain -> Idempotent, MUST NOT throw 409
+      await expect(gameService.playAgain(code, lobby.hostToken)).resolves.not.toThrow();
+
+      // Move to FINISHED then test backToLobby
+      await gameService.handlePuzzleTimeout(code);
+      await expect(gameService.backToLobby(code, lobby.hostToken)).resolves.not.toThrow();
+
+      // Repeated backToLobby while already in LOBBY -> Idempotent, MUST NOT throw 409
+      await expect(gameService.backToLobby(code, lobby.hostToken)).resolves.not.toThrow();
+    });
+  });
 });

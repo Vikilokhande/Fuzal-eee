@@ -806,6 +806,14 @@ export const gameService = {
     if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     await withLobbyLock(lobby, async () => {
       assertHost(lobby, hostToken);
+      if (lobby.status === GameState.MEMORY || lobby.status === GameState.PUZZLE) {
+        console.log("[START_GAME_ALREADY_ACTIVE]", {
+          code: code.toUpperCase(),
+          gameId: lobby.currentGameId ?? null,
+          status: lobby.status,
+        });
+        return;
+      }
       assertTransition(lobby, GameState.MEMORY);
       if (lobby.players.length === 0) {
         throw new GameError("BAD_REQUEST", "At least one player must join before starting.", 400);
@@ -923,6 +931,13 @@ export const gameService = {
         return; // idempotent re-entry
       }
       if (lobby.status === GameState.FINISHED) return; // cannot move back to PUZZLE if finished
+      if (lobby.status === GameState.LOBBY) {
+        console.log("[BEGIN_PUZZLE_IGNORED_LOBBY]", {
+          gameId: lobby.currentGameId ?? null,
+          status: lobby.status,
+        });
+        return; // Idempotent: cannot transition to PUZZLE directly from LOBBY
+      }
 
       const now = Date.now();
       const clockSkewToleranceMs = 500;
@@ -1506,6 +1521,14 @@ export const gameService = {
     const lobby = await lobbyService.getLobby(code);
     await withLobbyLock(lobby, async () => {
       assertHost(lobby, hostToken);
+      if (lobby.status === GameState.MEMORY || lobby.status === GameState.PUZZLE) {
+        console.log("[PLAY_AGAIN_ALREADY_ACTIVE]", {
+          code: code.toUpperCase(),
+          gameId: lobby.currentGameId ?? null,
+          status: lobby.status,
+        });
+        return;
+      }
       assertTransition(lobby, GameState.MEMORY);
       clearLobbyTimers(lobby);
       for (const p of lobby.players) {
@@ -1607,6 +1630,13 @@ export const gameService = {
     const lobby = await lobbyService.getLobby(code);
     await withLobbyLock(lobby, async () => {
       assertHost(lobby, hostToken);
+      if (lobby.status === GameState.LOBBY) {
+        console.log("[BACK_TO_LOBBY_ALREADY_ACTIVE]", {
+          code: code.toUpperCase(),
+          status: lobby.status,
+        });
+        return;
+      }
       clearLobbyTimers(lobby);
       const previousGameId = lobby.currentGameId ?? null;
 

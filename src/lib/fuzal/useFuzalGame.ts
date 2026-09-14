@@ -1073,30 +1073,41 @@ export function useFuzalGame(opts: UseOpts) {
 
   /* ---------------- Actions ---------------- */
 
+  const hostActionInFlightRef = useRef(false);
+
   const startGame = useCallback(async () => {
-    if (!opts.hostToken) return;
+    if (!opts.hostToken || hostActionInFlightRef.current) return;
+    hostActionInFlightRef.current = true;
     try {
       await postAction(opts.code, { type: "START_GAME", token: opts.hostToken });
     } catch (e) {
       showToast((e as Error).message);
+    } finally {
+      hostActionInFlightRef.current = false;
     }
   }, [opts.code, opts.hostToken, showToast]);
 
   const playAgain = useCallback(async () => {
-    if (!opts.hostToken) return;
+    if (!opts.hostToken || hostActionInFlightRef.current) return;
+    hostActionInFlightRef.current = true;
     try {
       await postAction(opts.code, { type: "PLAY_AGAIN", token: opts.hostToken });
     } catch (e) {
       showToast((e as Error).message);
+    } finally {
+      hostActionInFlightRef.current = false;
     }
   }, [opts.code, opts.hostToken, showToast]);
 
   const backToLobby = useCallback(async () => {
-    if (!opts.hostToken) return;
+    if (!opts.hostToken || hostActionInFlightRef.current) return;
+    hostActionInFlightRef.current = true;
     try {
       await postAction(opts.code, { type: "BACK_TO_LOBBY", token: opts.hostToken });
     } catch (e) {
       showToast((e as Error).message);
+    } finally {
+      hostActionInFlightRef.current = false;
     }
   }, [opts.code, opts.hostToken, showToast]);
 

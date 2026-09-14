@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { gameService, lobbyService } from "@/lib/game/service";
 import { actionSchema, LOBBY_CODE_RE } from "@/lib/game/types";
 import { errorResponse } from "@/lib/game/http";
+import { GameError } from "@/lib/game/errors";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,14 @@ export async function POST(
     if (!action.success) {
       return errorResponse(action.error);
     }
+
+    console.log("[ACTION_POST_RECEIVED]", {
+      code,
+      type: action.data.type,
+      actionId: (action.data as any).actionId ?? null,
+      playerId: (action.data as any).playerId ?? null,
+    });
+
     switch (action.data.type) {
       case "START_GAME":
         await gameService.startGame(code, action.data.token);
@@ -96,6 +105,15 @@ export async function POST(
     // never fail the user action or return 500.
     return Response.json({ ok: true });
   } catch (e) {
+    console.error("[ACTION_POST_ERROR]", {
+      code: (await ctx.params).code,
+      error:
+        e instanceof GameError
+          ? { code: e.code, message: e.message, status: e.httpStatus }
+          : e instanceof Error
+            ? { name: e.name, message: e.message }
+            : e,
+    });
     return errorResponse(e);
   }
 }

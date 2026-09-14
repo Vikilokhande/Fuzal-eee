@@ -58,11 +58,44 @@ export function LiveGameTab({
   onOpenDisplay?: () => void;
 }) {
   const [confirmClose, setConfirmClose] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isRestarting, setIsRestarting] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [activityFeed, setActivityFeed] = useState<ActivityFeedItem[]>([]);
   const prevPlayersCount = useRef(players.length);
   const prevStatus = useRef(status);
   const prevMoves = useRef<Record<string, number>>({});
   const prevCorrect = useRef<Record<string, number>>({});
+
+  const handleStartGame = async () => {
+    if (isStarting || !canStart) return;
+    setIsStarting(true);
+    try {
+      await onStartGame();
+    } finally {
+      setIsStarting(false);
+    }
+  };
+
+  const handlePlayAgain = async () => {
+    if (isRestarting || !onPlayAgain) return;
+    setIsRestarting(true);
+    try {
+      await onPlayAgain();
+    } finally {
+      setIsRestarting(false);
+    }
+  };
+
+  const handleBackToLobby = async () => {
+    if (isResetting || !onBackToLobby) return;
+    setIsResetting(true);
+    try {
+      await onBackToLobby();
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   const nowTime = () =>
     new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -285,19 +318,41 @@ export function LiveGameTab({
             {onPlayAgain && (
               <button
                 type="button"
-                onClick={onPlayAgain}
-                className="btn-primary px-6 py-2.5 text-xs sm:text-sm font-black"
+                onClick={handlePlayAgain}
+                disabled={isRestarting}
+                className="btn-primary px-6 py-2.5 text-xs sm:text-sm font-black flex items-center gap-1.5"
               >
-                🔁 Rematch (Play Again)
+                {isRestarting ? (
+                  <>
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent inline-block" />
+                    <span>STARTING REMATCH...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>🔁</span>
+                    <span>Rematch (Play Again)</span>
+                  </>
+                )}
               </button>
             )}
             {onBackToLobby && (
               <button
                 type="button"
-                onClick={onBackToLobby}
-                className="btn-secondary px-6 py-2.5 text-xs sm:text-sm font-bold"
+                onClick={handleBackToLobby}
+                disabled={isResetting}
+                className="btn-secondary px-6 py-2.5 text-xs sm:text-sm font-bold flex items-center gap-1.5"
               >
-                👥 Return to Lobby
+                {isResetting ? (
+                  <>
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent inline-block" />
+                    <span>RETURNING...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>👥</span>
+                    <span>Return to Lobby</span>
+                  </>
+                )}
               </button>
             )}
           </div>
@@ -415,12 +470,21 @@ export function LiveGameTab({
               {status === "LOBBY" && (
                 <button
                   type="button"
-                  onClick={onStartGame}
-                  disabled={!canStart}
+                  onClick={handleStartGame}
+                  disabled={!canStart || isStarting}
                   className="btn-primary px-6 py-3 text-sm font-black flex items-center gap-2"
                 >
-                  <span>🚀</span>
-                  <span>START ARENA MATCH</span>
+                  {isStarting ? (
+                    <>
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent inline-block" />
+                      <span>STARTING ARENA...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>🚀</span>
+                      <span>START ARENA MATCH</span>
+                    </>
+                  )}
                 </button>
               )}
 
@@ -429,21 +493,41 @@ export function LiveGameTab({
                   {onPlayAgain && (
                     <button
                       type="button"
-                      onClick={onPlayAgain}
+                      onClick={handlePlayAgain}
+                      disabled={isRestarting}
                       className="btn-primary px-5 py-2.5 text-xs font-bold flex items-center gap-2"
                     >
-                      <span>🔁</span>
-                      <span>PLAY AGAIN</span>
+                      {isRestarting ? (
+                        <>
+                          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent inline-block" />
+                          <span>STARTING REMATCH...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>🔁</span>
+                          <span>PLAY AGAIN</span>
+                        </>
+                      )}
                     </button>
                   )}
                   {onBackToLobby && (
                     <button
                       type="button"
-                      onClick={onBackToLobby}
+                      onClick={handleBackToLobby}
+                      disabled={isResetting}
                       className="btn-secondary px-5 py-2.5 text-xs font-bold flex items-center gap-2"
                     >
-                      <span>👥</span>
-                      <span>BACK TO LOBBY</span>
+                      {isResetting ? (
+                        <>
+                          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent inline-block" />
+                          <span>RETURNING...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>👥</span>
+                          <span>BACK TO LOBBY</span>
+                        </>
+                      )}
                     </button>
                   )}
                 </>
