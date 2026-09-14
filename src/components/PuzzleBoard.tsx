@@ -31,9 +31,7 @@ function shouldThrottleDragLog(lastAt: { current: number }, minInterval = 120): 
 }
 
 function logPuzzleDiagnostic(label: string, meta: Record<string, unknown>) {
-  if (process.env.NODE_ENV !== "test") {
-    console.debug(`[${label}]`, meta);
-  }
+  console.log(`[${label}]`, meta);
 }
 
 export function PuzzleBoard({
@@ -191,6 +189,13 @@ export function PuzzleBoard({
       cellRect,
     };
     lastDragMoveLogAt.current = Number.NEGATIVE_INFINITY;
+
+    logPuzzleDiagnostic("POINTER_DOWN", {
+      slot,
+      pointerId: e.pointerId,
+      x: Math.round(e.clientX),
+      y: Math.round(e.clientY),
+    });
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -228,7 +233,10 @@ export function PuzzleBoard({
       }
 
       logPuzzleDiagnostic("DRAG_START", {
-        sourceIndex: tracker.startSlot,
+        startSlot: tracker.startSlot,
+        pointerId: tracker.pointerId,
+        startX: Math.round(tracker.startX),
+        startY: Math.round(tracker.startY),
       });
     }
 
@@ -243,10 +251,11 @@ export function PuzzleBoard({
       }
 
       if (shouldThrottleDragLog(lastDragMoveLogAt, 120)) {
-        logPuzzleDiagnostic("DRAG_MOVE", {
-          sourceIndex: tracker.startSlot,
-          pointerX: Math.round(e.clientX),
-          pointerY: Math.round(e.clientY),
+        logPuzzleDiagnostic("POINTER_MOVE", {
+          startSlot: tracker.startSlot,
+          currentX: Math.round(e.clientX),
+          currentY: Math.round(e.clientY),
+          isDragging: true,
         });
       }
     }
@@ -271,17 +280,20 @@ export function PuzzleBoard({
     if (tracker.isDragging) {
       // ---------- DRAG GESTURE COMPLETED ----------
       const targetSlot = getSlotAtCoords(e.clientX, e.clientY);
-      logPuzzleDiagnostic("DRAG_DROP", {
-        sourceIndex: tracker.startSlot,
-        targetIndex: targetSlot,
-      });
-
-      if (
+      const willSwap =
         targetSlot !== null &&
         targetSlot !== tracker.startSlot &&
         targetSlot >= 0 &&
-        targetSlot < total
-      ) {
+        targetSlot < total;
+
+      logPuzzleDiagnostic("POINTER_UP", {
+        startSlot: tracker.startSlot,
+        targetSlot,
+        isDragging: true,
+        willSwap,
+      });
+
+      if (willSwap) {
         // Valid drop on different position: swap exactly once
         executeSwap(tracker.startSlot, targetSlot);
         setSelected(null);
@@ -295,6 +307,15 @@ export function PuzzleBoard({
     } else {
       // ---------- TAP GESTURE COMPLETED (Movement < 8px) ----------
       const tapSlot = tracker.startSlot;
+      const willSwap = selected !== null && selected !== tapSlot;
+
+      logPuzzleDiagnostic("POINTER_UP", {
+        startSlot: tapSlot,
+        targetSlot: willSwap ? tapSlot : null,
+        isDragging: false,
+        willSwap,
+      });
+
       if (selected === null) {
         // Tap piece A: becomes selected
         setSelected(tapSlot);

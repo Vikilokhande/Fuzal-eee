@@ -39,9 +39,21 @@ export default function PlayerGamePage() {
       };
       sessionStore.set(`player:${code}`, s);
       window.history.replaceState(null, "", `/play/${code}`);
+      console.log("[PLAYER_SESSION_CREATED]", { code, playerId: p, name: n, source: "url_query" });
+      console.log("[PLAYER_SESSION]", { code, playerId: p, name: n, source: "url_query" });
       return s;
     }
-    return sessionStore.get<Session>(`player:${code}`);
+    const stored = sessionStore.get<Session>(`player:${code}`);
+    if (stored?.player) {
+      console.log("[PLAYER_RECONNECT]", { code, playerId: stored.player.id, name: stored.player.name });
+      console.log("[PLAYER_SESSION]", {
+        code,
+        playerId: stored.player.id,
+        name: stored.player.name,
+        source: "session_storage",
+      });
+    }
+    return stored;
   });
 
   const [badSession] = useState<boolean>(() => {

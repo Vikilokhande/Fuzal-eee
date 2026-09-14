@@ -82,6 +82,26 @@ export default function JoinArenaPage() {
     setErrorMsg(null);
     try {
       const { player } = await joinLobby(code, trimmed);
+      if (existingSession && existingSession.player?.id && existingSession.player.id !== player.id) {
+        console.log("[PLAYER_SESSION_REPLACED]", {
+          code,
+          previousPlayerId: existingSession.player.id,
+          newPlayerId: player.id,
+          name: player.name,
+        });
+      }
+      console.log("[PLAYER_SESSION_CREATED]", {
+        code,
+        playerId: player.id,
+        name: player.name,
+        slot: player.slot,
+      });
+      console.log("[PLAYER_JOIN_ACCEPTED]", {
+        code,
+        playerId: player.id,
+        name: player.name,
+        slot: player.slot,
+      });
       sessionStore.set(`player:${code}`, { player });
       router.replace(
         `/play/${code}?p=${player.id}&t=${player.token}&n=${encodeURIComponent(player.name)}`,

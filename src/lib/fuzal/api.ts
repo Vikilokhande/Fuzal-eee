@@ -160,27 +160,54 @@ export function joinUrlFor(code: string): string {
 }
 
 const KEY_PREFIX = "fuzal:v1:";
+
+/**
+ * Tab-scoped session storage for player identity.
+ * Uses sessionStorage so multiple tabs on the same browser/device
+ * never collide or overwrite each other's player sessions.
+ */
 export const sessionStore = {
   get<T>(key: string): T | null {
+    if (typeof window === "undefined") return null;
     try {
-      const raw = localStorage.getItem(KEY_PREFIX + key);
-      return raw ? (JSON.parse(raw) as T) : null;
+      // 1. Check sessionStorage first (tab-isolated)
+      const sessionRaw = sessionStorage.getItem(KEY_PREFIX + key);
+      if (sessionRaw) {
+        return JSON.parse(sessionRaw) as T;
+      }
+      // 2. Host tokens can fall back to localStorage for convenience across windows
+      if (key.startsWith("host:")) {
+        const localRaw = localStorage.getItem(KEY_PREFIX + key);
+        return localRaw ? (JSON.parse(localRaw) as T) : null;
+      }
+      return null;
     } catch {
       return null;
     }
   },
   set(key: string, value: unknown) {
+    if (typeof window === "undefined") return;
     try {
-      localStorage.setItem(KEY_PREFIX + key, JSON.stringify(value));
+      const serialized = JSON.stringify(value);
+      // Player sessions are stored strictly in sessionStorage to prevent tab collisions
+      sessionStorage.setItem(KEY_PREFIX + key, serialized);
+      if (key.startsWith("host:")) {
+        localStorage.setItem(KEY_PREFIX + key, serialized);
+      }
     } catch {
       /* private mode etc. */
     }
   },
   remove(key: string) {
+    if (typeof window === "undefined") return;
     try {
-      localStorage.removeItem(KEY_PREFIX + key);
+      sessionStorage.removeItem(KEY_PREFIX + key);
+      if (key.startsWith("host:")) {
+        localStorage.removeItem(KEY_PREFIX + key);
+      }
     } catch {
       /* noop */
     }
   },
 };
+

@@ -203,13 +203,24 @@ export async function getEventsAfter(
         if (targetId && row.target_id === targetId) return true;
         return false;
       })
-      .map((row) => ({
-        id: Number(row.id),
-        type: row.event_type as EventType,
-        payload: row.payload,
-        at: new Date(row.created_at).getTime(),
-        gameId: row.game_id,
-      }));
+      .map((row) => {
+        let payload = row.payload;
+        // SSE ISOLATION: Ensure catch-up replay never delivers another player's board
+        if (payload && Array.isArray(payload.board) && payload.playerId && targetId) {
+          if (payload.playerId !== targetId) {
+            const sanitized = { ...payload };
+            delete sanitized.board;
+            payload = sanitized;
+          }
+        }
+        return {
+          id: Number(row.id),
+          type: row.event_type as EventType,
+          payload,
+          at: new Date(row.created_at).getTime(),
+          gameId: row.game_id,
+        };
+      });
   } catch {
     return [];
   }
@@ -259,6 +270,16 @@ class ConnectionManager {
 
   /** Send to everyone in the lobby. */
   async broadcast(code: string, event: GameEvent, gameId?: string | null): Promise<void> {
+    // SSE ISOLATION: A puzzle board must NEVER be broadcast to all players!
+    if ((event.payload as any)?.board) {
+      console.error("[SECURITY_VIOLATION] Attempted to broadcast an event containing a puzzle board!", {
+        code,
+        type: event.type,
+      });
+      const sanitized = { ...(event.payload as any) };
+      delete sanitized.board;
+      event = { ...event, payload: sanitized };
+    }
     await this.persistAndDeliver(code, null, () => true, event, gameId);
   }
 
@@ -325,6 +346,15 @@ class ConnectionManager {
     const frame = JSON.stringify(event);
     for (const sub of channel) {
       if (!match(sub.id)) continue;
+      // SSE ISOLATION: If event payload contains a player's puzzle board,
+      // verify that subscriber matches that player id. Never deliver Player A's board to Player B!
+      const p = (event.payload ?? {}) as Record<string, unknown>;
+      if (Array.isArray(p.board)) {
+        const targetPlayerId = typeof p.playerId === "string" ? p.playerId : null;
+        if (targetPlayerId && targetPlayerId !== sub.id) {
+          continue; // Block delivery of foreign player's board
+        }
+      }
       try {
         sub.send(frame, event.eventId);
       } catch {

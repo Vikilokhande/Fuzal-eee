@@ -399,6 +399,7 @@ export const lobbyService = {
     return withLobbyLock(lobby, async () => {
       const playerId = makePlayerId();
       const playerToken = makeToken();
+      console.log("[PLAYER_SESSION_CREATED]", { code: code.toUpperCase(), playerId, name: name.trim() });
 
       // Database-level atomic join: locks lobby row, enforces max 5 players, assigns slot 1..5
       const { data: joinRes, error: rpcErr } = await withDbRetry(
@@ -418,6 +419,11 @@ export const lobbyService = {
       }
 
       if (joinRes?.error) {
+        console.log("[PLAYER_IDENTITY_CONFLICT]", {
+          code: code.toUpperCase(),
+          playerId,
+          reason: joinRes.error,
+        });
         const httpStatus =
           joinRes.error === "FULL" || joinRes.error === "CONFLICT"
             ? 409
@@ -428,6 +434,12 @@ export const lobbyService = {
       }
 
       const assignedSlot = Number(joinRes?.slot ?? freeSlot(lobby));
+      console.log("[PLAYER_JOIN_ACCEPTED]", {
+        code: code.toUpperCase(),
+        playerId,
+        name: name.trim(),
+        slot: assignedSlot,
+      });
 
       const player: Player = {
         id: playerId,
@@ -499,6 +511,11 @@ export const lobbyService = {
     }
     const player = findPlayer(lobby, opts.playerId ?? "");
     if (!player || !opts.playerToken || !safeEqual(opts.playerToken, player.token)) {
+      console.log("[PLAYER_IDENTITY_CONFLICT]", {
+        code: code.toUpperCase(),
+        playerId: opts.playerId,
+        reason: !player ? "PLAYER_NOT_FOUND" : "TOKEN_MISMATCH",
+      });
       throw new GameError("SESSION_EXPIRED", "Player session expired or not found in lobby.", 410);
     }
     // Reconnect: cancel pending removal / flip status back to connected.
@@ -507,6 +524,12 @@ export const lobbyService = {
       clearTimeout(pending);
       delete lobby.disconnectTimers[player.id];
     }
+    console.log("[PLAYER_RECONNECT]", {
+      code: code.toUpperCase(),
+      playerId: player.id,
+      name: player.name,
+      previousStatus: player.connectionStatus,
+    });
     if (player.connectionStatus === PlayerConnection.DISCONNECTED) {
       player.connectionStatus = PlayerConnection.CONNECTED;
       await lobbyRepo.put(lobby);
@@ -639,11 +662,14 @@ export const lobbyService = {
       p.puzzleProgress = lobby.players.map(playerProgress);
       if (kind === "player" && you?.puzzle) {
         p.puzzle = {
+          playerId: you.id,
           board: you.puzzle.board,
           moves: you.puzzle.moves,
+          version: you.puzzle.version ?? lobby.version ?? 1,
           startedAt: you.puzzle.startedAt,
           correctSlots: correctSlots(you.puzzle.board),
           eliminated: you.eliminated ?? you.puzzle.eliminated ?? false,
+          completed: you.puzzle.completed,
         };
       }
     }
@@ -652,11 +678,14 @@ export const lobbyService = {
       p.puzzleProgress = lobby.players.map(playerProgress);
       if (kind === "player" && you?.puzzle) {
         p.puzzle = {
+          playerId: you.id,
           board: you.puzzle.board,
           moves: you.puzzle.moves,
+          version: you.puzzle.version ?? lobby.version ?? 1,
           startedAt: you.puzzle.startedAt,
           correctSlots: correctSlots(you.puzzle.board),
           eliminated: you.eliminated ?? you.puzzle.eliminated ?? false,
+          completed: you.puzzle.completed,
         };
       }
       p.result = resultPayload(lobby);
@@ -1034,8 +1063,10 @@ export const gameService = {
           ev(
             EventType.PUZZLE_STARTED,
             {
+              playerId: p.id,
               board: pz.board,
               moves: 0,
+              version: pz.version ?? lobby.version ?? 1,
               startedAt,
               endsAt,
               durationSeconds,
@@ -1245,6 +1276,7 @@ export const gameService = {
           ev(
             EventType.PUZZLE_MOVE,
             {
+              playerId: player.id,
               board: puzzle.board,
               moves: puzzle.moves,
               correctSlots: correctSlots(puzzle.board),
@@ -1293,6 +1325,7 @@ export const gameService = {
         ev(
           EventType.PUZZLE_MOVE,
           {
+            playerId: player.id,
             board: puzzle.board,
             moves: puzzle.moves,
             correctSlots: correctSlots(puzzle.board),
@@ -1401,6 +1434,7 @@ export const gameService = {
         ev(
           EventType.PUZZLE_MOVE,
           {
+            playerId: player.id,
             board: puzzle.board,
             moves: puzzle.moves,
             correctSlots: correctSlots(puzzle.board),
@@ -1408,6 +1442,7 @@ export const gameService = {
             pieceCount: total,
             gameId,
             actionId,
+            version: puzzle.version,
           },
           lobby.id,
           gameId,

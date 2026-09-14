@@ -70,6 +70,7 @@ export interface ClientState {
     completed?: boolean;
     completedAt?: number;
     eliminated?: boolean;
+    version?: number;
   } | null;
   puzzleStartedAt: number | null;
   puzzleEndsAt?: number | null;
@@ -149,15 +150,15 @@ async function postActionUntilSettled(
   body: Record<string, unknown>,
   shouldContinue: () => boolean,
   onRetryableFailure: (error: unknown, attempt: number) => void,
-): Promise<boolean> {
+): Promise<Record<string, unknown> | boolean | null> {
   for (let attempt = 1; ; attempt += 1) {
-    if (!shouldContinue()) return false;
+    if (!shouldContinue()) return null;
     try {
-      await postAction(code, body);
-      return true;
+      const res = await postAction<Record<string, unknown>>(code, body);
+      return res ?? true;
     } catch (error) {
       if (!isRetryableActionError(error)) throw error;
-      if (!shouldContinue()) return false;
+      if (!shouldContinue()) return null;
       onRetryableFailure(error, attempt);
       await delay(Math.min(250 * 2 ** Math.min(attempt - 1, 5), 8000));
     }
@@ -196,6 +197,7 @@ function normalizePuzzle(
     completed: Boolean(raw.completed),
     completedAt: asNullableNumber(raw.completedAt, null) ?? undefined,
     eliminated: Boolean(raw.eliminated),
+    version: asPositiveInt(raw.version, 1),
   };
 }
 
@@ -277,8 +279,7 @@ function logClientDiagnostic(
   meta: Record<string, unknown>,
   level: "info" | "warn" | "error" = "info",
 ) {
-  if (process.env.NODE_ENV === "test") return;
-  const logger = level === "warn" ? console.warn : level === "error" ? console.error : console.info;
+  const logger = level === "warn" ? console.warn : level === "error" ? console.error : console.log;
   logger(`[${label}]`, meta);
 }
 
@@ -389,6 +390,34 @@ export function useFuzalGame(opts: UseOpts) {
               incomingMoves: snapshot.puzzle.moves,
             });
             return false;
+          }
+        }
+        if (
+          opts.kind === "player" &&
+          prev?.puzzle &&
+          snapshot.puzzle &&
+          prev.currentGameId &&
+          snapshot.currentGameId === prev.currentGameId
+        ) {
+          const incomingMoves = snapshot.puzzle.moves;
+          const currentMoves = prev.puzzle.moves;
+          const incomingVersion = snapshot.puzzle.version ?? 0;
+          const currentVersion = prev.puzzle.version ?? 0;
+          if (incomingMoves < currentMoves || incomingVersion < currentVersion) {
+            logClientDiagnostic("REMOTE_BOARD_IGNORED", {
+              reason: "STALE_SNAPSHOT",
+              currentMoves,
+              incomingMoves,
+              currentVersion,
+              incomingVersion,
+            });
+            logClientDiagnostic("REMOTE_BOARD_EVENT", {
+              status: "IGNORED",
+              reason: "STALE_SNAPSHOT",
+              currentMoves,
+              incomingMoves,
+            });
+            snapshot.puzzle = prev.puzzle;
           }
         }
         commitState(snapshot);
@@ -537,6 +566,28 @@ export function useFuzalGame(opts: UseOpts) {
             next.puzzleProgress = p.players as ProgressView[];
           }
           if (Array.isArray(p.board)) {
+            const eventPlayerId = asNullableString(p.playerId);
+            if (opts.kind === "player" && eventPlayerId && eventPlayerId !== opts.playerId) {
+              logClientDiagnostic("REMOTE_BOARD_IGNORED", {
+                reason: "FOREIGN_PLAYER",
+                eventPlayerId,
+                myPlayerId: opts.playerId,
+                gameId: eventGameId,
+              });
+              logClientDiagnostic("REMOTE_BOARD_EVENT", {
+                status: "IGNORED",
+                reason: "FOREIGN_PLAYER",
+                eventPlayerId,
+                myPlayerId: opts.playerId,
+              });
+              break;
+            }
+            logClientDiagnostic("REMOTE_BOARD_EVENT", {
+              status: "APPLIED",
+              reason: "PUZZLE_STARTED",
+              gameId: eventGameId,
+              playerId: eventPlayerId ?? opts.playerId,
+            });
             const board = p.board as number[];
             const boardChanged =
               !prev.puzzle ||
@@ -549,6 +600,7 @@ export function useFuzalGame(opts: UseOpts) {
               correctSlots: computeCorrect(board),
               eliminated: prev.puzzle?.eliminated ?? false,
               completed: Boolean(p.completed),
+              version: asPositiveInt(p.version, 1),
             };
             if (boardChanged && opts.kind === "player") {
               setGoFlash(true);
@@ -579,27 +631,13 @@ export function useFuzalGame(opts: UseOpts) {
         }
         case EventType.PUZZLE_MOVE: {
           const payloadActionId = asNullableString(p.actionId);
-          if (payloadActionId && payloadActionId === swapInFlightRef.current) {
-            markActionAccepted(payloadActionId, event.eventId ?? null);
-          }
-          if (Array.isArray(p.board)) {
-            const board = p.board as number[];
-            const isCompleted = Boolean(p.completed);
-            next.puzzle = {
-              board,
-              moves: asNumber(p.moves, next.puzzle?.moves ?? 0),
-              startedAt: next.puzzle?.startedAt ?? Date.now(),
-              correctSlots: computeCorrect(board),
-              eliminated: next.puzzle?.eliminated ?? false,
-              completed: next.puzzle?.completed || isCompleted,
-              completedAt:
-                next.puzzle?.completedAt ??
-                (isCompleted ? asNumber(p.completedAt, Date.now()) : undefined),
-            };
-          }
-          if (typeof p.playerId === "string" && Array.isArray(next.puzzleProgress)) {
+          const eventPlayerId = asNullableString(p.playerId);
+          const incomingVersion = asNullableNumber(p.version, null);
+
+          // 1. Update puzzleProgress for HUD / player roster
+          if (eventPlayerId && Array.isArray(next.puzzleProgress)) {
             next.puzzleProgress = next.puzzleProgress.map((pr) =>
-              pr.id === p.playerId
+              pr.id === eventPlayerId
                 ? {
                     ...pr,
                     moves: asNumber(p.moves, pr.moves),
@@ -608,6 +646,96 @@ export function useFuzalGame(opts: UseOpts) {
                   }
                 : pr,
             );
+          }
+
+          // 2. If board is present, check scoping and apply ONLY to current player
+          if (Array.isArray(p.board)) {
+            // Defense-in-depth: Never apply another player's board!
+            if (opts.kind === "player" && eventPlayerId && eventPlayerId !== opts.playerId) {
+              logClientDiagnostic("REMOTE_BOARD_IGNORED", {
+                reason: "FOREIGN_PLAYER",
+                eventPlayerId,
+                myPlayerId: opts.playerId,
+                gameId: eventGameId,
+              });
+              logClientDiagnostic("REMOTE_BOARD_EVENT", {
+                status: "IGNORED",
+                reason: "FOREIGN_PLAYER",
+                eventPlayerId,
+                myPlayerId: opts.playerId,
+              });
+              break;
+            }
+
+            // Reject if gameId does not match current game
+            if (eventGameId && next.currentGameId && eventGameId !== next.currentGameId) {
+              logClientDiagnostic("REMOTE_BOARD_IGNORED", {
+                reason: "GAME_ID_MISMATCH",
+                eventGameId,
+                currentGameId: next.currentGameId,
+              });
+              logClientDiagnostic("REMOTE_BOARD_EVENT", {
+                status: "IGNORED",
+                reason: "GAME_ID_MISMATCH",
+              });
+              break;
+            }
+
+            // Version monotonicity check: Never apply an older version than local current
+            const currentVersion = prev.puzzle?.version ?? 0;
+            if (incomingVersion !== null && incomingVersion < currentVersion) {
+              logClientDiagnostic("REMOTE_BOARD_IGNORED", {
+                reason: "STALE_VERSION",
+                incomingVersion,
+                currentVersion,
+                gameId: eventGameId,
+              });
+              logClientDiagnostic("REMOTE_BOARD_EVENT", {
+                status: "IGNORED",
+                reason: "STALE_VERSION",
+                incomingVersion,
+                currentVersion,
+              });
+              break;
+            }
+
+            if (payloadActionId && payloadActionId === swapInFlightRef.current) {
+              markActionAccepted(payloadActionId, event.eventId ?? null);
+            }
+
+            const board = p.board as number[];
+            const isCompleted = Boolean(p.completed);
+            const moves = asNumber(p.moves, next.puzzle?.moves ?? 0);
+            const version = incomingVersion ?? currentVersion + 1;
+
+            logClientDiagnostic("REMOTE_BOARD_EVENT", {
+              status: "APPLIED",
+              reason: payloadActionId ? "ACTION_CONFIRMED" : "REMOTE_MOVE",
+              actionId: payloadActionId,
+              version,
+              moves,
+              gameId: eventGameId,
+            });
+            logClientDiagnostic("BOARD_RECONCILE", {
+              actionId: payloadActionId,
+              gameId: eventGameId,
+              playerId: opts.playerId,
+              version,
+              moves,
+            });
+
+            next.puzzle = {
+              board,
+              moves,
+              startedAt: next.puzzle?.startedAt ?? Date.now(),
+              correctSlots: computeCorrect(board),
+              eliminated: next.puzzle?.eliminated ?? false,
+              completed: next.puzzle?.completed || isCompleted,
+              completedAt:
+                next.puzzle?.completedAt ??
+                (isCompleted ? asNumber(p.completedAt, Date.now()) : undefined),
+              version,
+            };
           }
           break;
         }
@@ -1003,7 +1131,17 @@ export function useFuzalGame(opts: UseOpts) {
       const previousPuzzle = prev.puzzle;
       const nextBoard = swapPieces(prev.puzzle.board, from, to);
       const solved = isSolved(nextBoard, totalPieces);
+      const optimisticVersion = (prev.puzzle.version ?? 0) + 1;
       swapInFlightRef.current = actionId;
+
+      logClientDiagnostic("SWAP_SUBMIT", {
+        actionId,
+        gameId: prev.currentGameId,
+        playerId: opts.playerId,
+        from,
+        to,
+        version: optimisticVersion,
+      });
       logClientDiagnostic("ACTION_SENT", {
         actionId,
         gameId: prev.currentGameId,
@@ -1021,6 +1159,7 @@ export function useFuzalGame(opts: UseOpts) {
           ...prev.puzzle,
           board: nextBoard,
           moves: prev.puzzle.moves + 1,
+          version: optimisticVersion,
           correctSlots: computeCorrect(nextBoard),
           completed: prev.puzzle.completed || solved,
           completedAt:
@@ -1063,11 +1202,41 @@ export function useFuzalGame(opts: UseOpts) {
           },
         );
         if (accepted) {
-          markActionAccepted(actionId, null);
+          const res = typeof accepted === "object" && accepted !== null ? accepted : null;
+          const serverVersion = asNullableNumber(res?.version, null) ?? optimisticVersion;
+          const serverMoves = asNullableNumber(res?.moves, null) ?? prev.puzzle.moves + 1;
+
+          logClientDiagnostic("SWAP_RESPONSE", {
+            actionId,
+            gameId: prev.currentGameId,
+            playerId: opts.playerId,
+            success: true,
+            version: serverVersion,
+            moves: serverMoves,
+          });
+          logClientDiagnostic("BOARD_RECONCILE", {
+            actionId,
+            gameId: prev.currentGameId,
+            playerId: opts.playerId,
+            version: serverVersion,
+            moves: serverMoves,
+          });
+          markActionAccepted(actionId, serverVersion);
         } else if (swapInFlightRef.current === actionId) {
           swapInFlightRef.current = null;
         }
       } catch (e) {
+        logClientDiagnostic(
+          "SWAP_RESPONSE",
+          {
+            actionId,
+            gameId: prev.currentGameId,
+            playerId: opts.playerId,
+            success: false,
+            ...actionErrorMeta(e),
+          },
+          "warn",
+        );
         logClientDiagnostic(
           "ACTION_REJECTED",
           {
