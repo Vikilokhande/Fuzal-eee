@@ -34,7 +34,7 @@ export function Wordmark({ size = 48 }: { size?: number }) {
         className="font-display font-bold neon-text leading-none"
         style={{ fontSize: size * 1.05 }}
       >
-        FUZAL
+        FUZZAL
       </h1>
     </div>
   );

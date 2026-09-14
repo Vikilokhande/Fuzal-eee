@@ -38,10 +38,7 @@ export function ControlRoomTopBar({
       <div className="mx-auto flex flex-wrap items-center justify-between gap-3 max-w-7xl">
         {/* Brand & Cockpit Title */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <Logo size={28} />
-            <Wordmark size={20} />
-          </div>
+          <Wordmark size={22} />
           <div className="hidden sm:block h-5 w-px bg-white/15" />
           <span className="hidden sm:inline-block font-mono text-xs font-black uppercase tracking-[0.25em] text-cyan-300">
             Control Room
@@ -58,60 +55,58 @@ export function ControlRoomTopBar({
               <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
                 Lobby:
               </span>
-              <span className="font-mono font-black text-cyan-300">{lobbyCode}</span>
+              <span className="font-mono text-xs font-black text-cyan-300">
+                {lobbyCode}
+              </span>
             </div>
           )}
 
-          <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/80 px-2.5 py-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
-              Players:
-            </span>
-            <span className="font-mono font-bold text-white">
-              <span className="text-cyan-300">{playersCount}</span>
-              <span className="text-white/40"> / {maxPlayers}</span>
-            </span>
-          </div>
+          {playersCount !== undefined && (
+            <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/80 px-2.5 py-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
+                Players:
+              </span>
+              <span className="font-mono text-xs font-black text-emerald-400">
+                {playersCount}
+              </span>
+              <span className="text-white/40">/</span>
+              <span className="font-mono text-xs text-white/70">
+                {maxPlayers}
+              </span>
+            </div>
+          )}
 
-          <div className="hidden md:flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/80 px-2.5 py-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
-              Grid:
-            </span>
-            <span className="font-mono font-bold text-purple-300">
-              {gridCols}×{gridRows} ({pieceCount} Pcs)
-            </span>
-          </div>
+          {gridCols > 0 && gridRows > 0 && (
+            <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/80 px-2.5 py-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
+                Grid:
+              </span>
+              <span className="font-mono text-xs font-black text-purple-300">
+                {gridCols}×{gridRows}
+              </span>
+              <span className="text-[10px] text-white/50">
+                ({pieceCount} Pcs)
+              </span>
+            </div>
+          )}
 
           {status && (
             <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/80 px-2.5 py-1">
               <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
                 Phase:
               </span>
-              <span
-                className={`font-mono font-black uppercase ${
-                  status === "PUZZLE"
-                    ? "text-fuchsia-300"
-                    : status === "MEMORY"
-                      ? "text-amber-300"
-                      : status === "FINISHED"
-                        ? "text-emerald-400"
-                        : "text-cyan-300"
-                }`}
-              >
+              <span className="font-mono text-xs font-black text-amber-300">
                 {status}
               </span>
             </div>
           )}
 
-          {timerMs !== null && timerMs !== undefined && (
-            <div className="flex items-center gap-1.5 rounded-xl border border-cyan-400/30 bg-slate-900/90 px-3 py-1 shadow-[0_0_12px_rgba(34,211,238,0.25)]">
+          {timerMs !== undefined && timerMs !== null && (
+            <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/80 px-2.5 py-1">
               <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/60">
                 Timer:
               </span>
-              <span
-                className={`font-mono text-sm font-black tabular-nums ${
-                  timerMs <= 30000 ? "text-rose-400 animate-pulse" : "text-cyan-300"
-                }`}
-              >
+              <span className="font-mono text-xs font-black text-cyan-300">
                 {timerText}
               </span>
             </div>
@@ -120,18 +115,6 @@ export function ControlRoomTopBar({
 
         {/* Quick Actions */}
         <div className="flex items-center gap-2">
-          {lobbyCode && onOpenDisplay && (
-            <button
-              type="button"
-              onClick={onOpenDisplay}
-              className="btn-secondary px-3 py-1.5 text-xs font-bold flex items-center gap-1.5"
-              title="Open Big-Screen Presentation for Projector or TV"
-            >
-              <span>📺</span>
-              <span className="hidden sm:inline">Big Screen</span>
-            </button>
-          )}
-
           {onNewArena && (
             <button
               type="button"

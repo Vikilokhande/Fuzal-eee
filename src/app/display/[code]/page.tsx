@@ -71,8 +71,7 @@ export default function BigScreenDisplayPage() {
       {/* Top Bar for Big Screen */}
       <header className="relative z-10 flex items-center justify-between w-full border-b border-white/10 pb-4">
         <div className="flex items-center gap-4">
-          <Logo size={44} />
-          <Wordmark size={32} />
+          <Wordmark size={36} />
           <span className="hidden sm:inline-block h-6 w-px bg-white/20" />
           <span className="hidden sm:inline-block font-mono text-sm font-black uppercase tracking-[0.3em] text-cyan-300">
             Live Arena
@@ -486,7 +485,7 @@ export default function BigScreenDisplayPage() {
 
       {/* Footer Branding for Big Screen */}
       <footer className="relative z-10 flex items-center justify-between w-full border-t border-white/10 pt-4 text-xs text-indigo-200/50 font-mono">
-        <span>FUZAL MULTIPLAYER ARENA • EVENT DISPLAY SYSTEM</span>
+        <span>FUZZAL MULTIPLAYER ARENA • EVENT DISPLAY SYSTEM</span>
         <span>AUDIENCE BROADCAST</span>
       </footer>
     </main>

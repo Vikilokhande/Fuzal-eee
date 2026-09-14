@@ -76,7 +76,7 @@ function HostPageContent() {
           <div className="text-6xl">🎛️</div>
           <h1 className="font-display text-3xl font-bold text-white">No Host Session</h1>
           <p className="text-sm text-indigo-200/70">
-            Create a new FUZAL arena lobby to access the control room.
+            Create a new FUZZAL arena lobby to access the control room.
           </p>
           <button className="btn-primary w-full py-3 mt-2" onClick={() => router.push("/")}>
             Create an Arena

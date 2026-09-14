@@ -50,7 +50,7 @@ export function ParticipationScreen({
             <p className="text-sm text-indigo-200/80">
               {isWinner
                 ? "You solved the puzzle first and conquered the arena!"
-                : "Thanks for playing FUZAL. You were part of this live match."}
+                : "Thanks for playing FUZZAL. You were part of this live match."}
             </p>
           </div>
 

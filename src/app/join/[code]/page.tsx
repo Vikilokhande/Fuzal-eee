@@ -137,7 +137,7 @@ export default function JoinArenaPage() {
               Arena Not Found
             </h2>
             <p className="text-xs sm:text-sm text-indigo-200/70">
-              No active FUZAL game found with code <strong className="text-cyan-300">{code}</strong>.
+              No active FUZZAL game found with code <strong className="text-cyan-300">{code}</strong>.
               Scan the QR code on the host screen again.
             </p>
           </div>

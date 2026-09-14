@@ -212,18 +212,6 @@ export function LiveGameTab({
             Real-time live battle operations and player telemetry.
           </p>
         </div>
-
-        {/* Big Screen Display Launcher */}
-        {onOpenDisplay && (
-          <button
-            type="button"
-            onClick={onOpenDisplay}
-            className="btn-secondary px-4 py-2.5 text-xs sm:text-sm font-bold flex items-center gap-2"
-          >
-            <span>📺</span>
-            <span>Open Big Screen Display</span>
-          </button>
-        )}
       </div>
 
       {/* Phase Specific Visuals */}
