@@ -266,7 +266,7 @@ export default function JoinArenaPage() {
                   maxLength={16}
                   disabled={joining}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Viki"
+                  placeholder="Enter your name"
                   className="w-full rounded-2xl border-2 border-white/15 bg-slate-900/90 px-4 py-3.5 text-xl font-bold text-white outline-none transition-all placeholder:text-white/25 focus:border-cyan-400 focus:shadow-[0_0_20px_rgba(34,211,238,0.35)]"
                 />
               </div>
