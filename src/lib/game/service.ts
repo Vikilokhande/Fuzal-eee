@@ -1058,11 +1058,11 @@ export const gameService = {
       }
       if (lobby.status === GameState.FINISHED) return; // cannot move back to PUZZLE if finished
       if (lobby.status === GameState.LOBBY) {
-        console.log("[BEGIN_PUZZLE_REJECTED_LOBBY]", {
+        console.log("[BEGIN_PUZZLE_IGNORED_LOBBY]", {
           gameId: lobby.currentGameId ?? null,
           status: lobby.status,
         });
-        throw new GameError("INVALID_STATE", "Cannot transition to PUZZLE directly from LOBBY.", 409);
+        return; // Idempotent: cannot transition to PUZZLE directly from LOBBY
       }
 
       const now = Date.now();

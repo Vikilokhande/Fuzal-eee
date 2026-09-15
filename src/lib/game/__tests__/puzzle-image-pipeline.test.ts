@@ -226,7 +226,7 @@ describe("FUZAL — Puzzle Image Pipeline & Bug Fixes", () => {
         }),
       });
 
-      const res = await POST(req, { params: Promise.resolve({ code }) });
+      const res = await POST(req as any, { params: Promise.resolve({ code }) });
       expect(res.status).toBe(200);
 
       const runningLobby = await lobbyRepo.getByCode(code);
