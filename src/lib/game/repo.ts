@@ -225,6 +225,7 @@ export class SupabaseLobbyRepository implements LobbyRepository {
 
       // 2. Batch sync players (1 query instead of sequential loop)
       if (lobby.players.length > 0 && lobbyDbId) {
+        const maxSlot = Math.max(1, lobby.maxPlayers);
         const playerRows = lobby.players.map((p) => ({
           id: p.id,
           lobby_id: lobbyDbId,
@@ -232,7 +233,8 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           player_token_hash: p.token,
           connected: p.connectionStatus === PlayerConnection.CONNECTED,
           score: p.score,
-          slot: Math.max(1, Math.min(5, p.slot || 1)),
+          // Clamp slot to 1..maxPlayers (never to a hardcoded 5 limit)
+          slot: Math.max(1, Math.min(maxSlot, p.slot || 1)),
           active: true,
           last_seen_at: new Date().toISOString(),
         }));
@@ -557,7 +559,8 @@ export class SupabaseLobbyRepository implements LobbyRepository {
           hostToken: lobbyRow.host_token_hash,
           status: lobbyRow.status as GameState,
           players,
-          maxPlayers: lobbyRow.max_players ?? 5,
+          // Use persisted value; fall back to config.maxPlayers (never hardcoded 5)
+          maxPlayers: lobbyRow.max_players ?? config.maxPlayers,
           gridCols,
           gridRows,
           pieceCount,
@@ -578,7 +581,8 @@ export class SupabaseLobbyRepository implements LobbyRepository {
       } else {
         lobby.hostToken = lobbyRow.host_token_hash;
         lobby.status = lobbyRow.status as GameState;
-        lobby.maxPlayers = lobbyRow.max_players ?? 5;
+        // Use persisted value; fall back to config.maxPlayers (never hardcoded 5)
+        lobby.maxPlayers = lobbyRow.max_players ?? config.maxPlayers;
         lobby.gridCols = gridCols;
         lobby.gridRows = gridRows;
         lobby.pieceCount = pieceCount;

@@ -481,6 +481,12 @@ export default function PlayerGamePage() {
                     loading={piecesLoading}
                     error={piecesError}
                     completed={Boolean(state.puzzle.completed)}
+                    isPuzzleActive={
+                      state.status === "PUZZLE" &&
+                      puzzleRemainingMs > 0 &&
+                      !isEliminated &&
+                      !state.puzzle.completed
+                    }
                     onRetry={retryLoadPieces}
                     onSwap={game.actions.swap}
                   />

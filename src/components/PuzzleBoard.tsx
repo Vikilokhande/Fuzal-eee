@@ -42,6 +42,7 @@ export function PuzzleBoard({
   loadedCount,
   pieceSrcs,
   interactive = true,
+  isPuzzleActive = true,
   completed = false,
   error = null,
   onRetry,
@@ -54,6 +55,13 @@ export function PuzzleBoard({
   loadedCount?: number;
   pieceSrcs: Record<number, string>;
   interactive?: boolean;
+  /**
+   * When false the board ignores all gesture completion events and never calls onSwap.
+   * Callers should set this to false when the puzzle phase is not PUZZLE or the
+   * remaining time has reached zero. This prevents in-flight drag gestures from
+   * submitting a SWAP after the game has ended.
+   */
+  isPuzzleActive?: boolean;
   completed?: boolean;
   loading?: boolean;
   error?: string | null;
@@ -158,6 +166,14 @@ export function PuzzleBoard({
   /** Dispatches exactly one swap and locks briefly against synthetic double-triggers */
   const executeSwap = (a: number, b: number) => {
     if (!isInteractive || a === b || swapLockRef.current) return;
+    // Final authoritative guard: never submit a SWAP if the puzzle is no longer active.
+    // This covers the race where a drag started during PUZZLE phase but the timer
+    // expired or the game transitioned before pointerup fires.
+    if (!isPuzzleActive) {
+      logPuzzleDiagnostic("SWAP_CANCELLED_INACTIVE", { from: a, to: b, reason: "isPuzzleActive=false" });
+      setSelected(null);
+      return;
+    }
     swapLockRef.current = true;
     setTimeout(() => {
       swapLockRef.current = false;
@@ -284,39 +300,46 @@ export function PuzzleBoard({
         targetSlot !== null &&
         targetSlot !== tracker.startSlot &&
         targetSlot >= 0 &&
-        targetSlot < total;
+        targetSlot < total &&
+        isPuzzleActive; // final guard against stale drags
 
       logPuzzleDiagnostic("POINTER_UP", {
         startSlot: tracker.startSlot,
         targetSlot,
         isDragging: true,
         willSwap,
+        isPuzzleActive,
       });
 
       if (willSwap) {
         // Valid drop on different position: swap exactly once
-        executeSwap(tracker.startSlot, targetSlot);
+        executeSwap(tracker.startSlot, targetSlot!);
         setSelected(null);
         if (typeof navigator !== "undefined" && navigator.vibrate) {
           navigator.vibrate(24);
         }
       } else {
-        // Dropped outside board or back on startSlot: cancel drag with zero moves
+        // Dropped outside board or back on startSlot or puzzle inactive: cancel drag
         setSelected(null);
       }
     } else {
       // ---------- TAP GESTURE COMPLETED (Movement < 8px) ----------
       const tapSlot = tracker.startSlot;
-      const willSwap = selected !== null && selected !== tapSlot;
+      // Final guard for tap: do not swap if the puzzle is no longer active
+      const willSwap = selected !== null && selected !== tapSlot && isPuzzleActive;
 
       logPuzzleDiagnostic("POINTER_UP", {
         startSlot: tapSlot,
         targetSlot: willSwap ? tapSlot : null,
         isDragging: false,
         willSwap,
+        isPuzzleActive,
       });
 
-      if (selected === null) {
+      if (!isPuzzleActive) {
+        // Puzzle ended while user was tapping; cancel selection silently
+        setSelected(null);
+      } else if (selected === null) {
         // Tap piece A: becomes selected
         setSelected(tapSlot);
         if (typeof navigator !== "undefined" && navigator.vibrate) {

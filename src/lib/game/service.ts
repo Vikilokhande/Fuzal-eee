@@ -67,11 +67,11 @@ function safeEqual(a: string, b: string): boolean {
 const globalForActions = globalThis as typeof globalThis & {
   __fuzalClientActions?: Set<string>;
 };
+// Keep the in-process dedup Set across ALL environments for fast duplicate detection.
+// The DB client_actions table remains the authoritative cross-process idempotency source.
 const seenClientActions =
   globalForActions.__fuzalClientActions ?? new Set<string>();
-if (process.env.NODE_ENV !== "production") {
-  globalForActions.__fuzalClientActions = seenClientActions;
-}
+globalForActions.__fuzalClientActions = seenClientActions;
 
 function isDuplicateActionError(err: any): boolean {
   const msg = String(err?.message || err?.details || "").toLowerCase();
@@ -122,12 +122,13 @@ async function claimClientAction(
   const normalizedCode = code.toUpperCase();
   const key = `${normalizedCode}:${lobby.currentGameId ?? "no-game"}:${playerId}:${actionId}`;
   if (seenClientActions.has(key)) {
-    console.log("[ACTION_DEDUPED]", {
+    console.log("[ACTION_DUPLICATE]", {
       code: normalizedCode,
       gameId: lobby.currentGameId ?? null,
       playerId,
       actionType,
       actionId,
+      source: "process_cache",
     });
     return false;
   }
@@ -151,12 +152,13 @@ async function claimClientAction(
 
   if (!error) return true;
   if (isDuplicateActionError(error)) {
-    console.log("[ACTION_DEDUPED_DB]", {
+    console.log("[ACTION_DUPLICATE]", {
       code: normalizedCode,
       gameId: lobby.currentGameId ?? null,
       playerId,
       actionType,
       actionId,
+      source: "db_constraint",
     });
     return false;
   }
@@ -401,7 +403,8 @@ export const lobbyService = {
       const playerToken = makeToken();
       console.log("[PLAYER_SESSION_CREATED]", { code: code.toUpperCase(), playerId, name: name.trim() });
 
-      // Database-level atomic join: locks lobby row, enforces max 5 players, assigns slot 1..5
+      // Database-level atomic join: locks lobby row, enforces max players, assigns slot 1..maxPlayers
+      console.log("[JOIN_ATTEMPT]", { code: code.toUpperCase(), playerId, name: name.trim() });
       const { data: joinRes, error: rpcErr } = await withDbRetry(
         `join_lobby_atomic(${code})`,
         () =>
@@ -419,10 +422,12 @@ export const lobbyService = {
       }
 
       if (joinRes?.error) {
-        console.log("[PLAYER_IDENTITY_CONFLICT]", {
+        const isCapacity = joinRes.error === "FULL";
+        console.log(isCapacity ? "[JOIN_CAPACITY_REJECTED]" : "[JOIN_DUPLICATE_SESSION]", {
           code: code.toUpperCase(),
           playerId,
           reason: joinRes.error,
+          message: joinRes.message,
         });
         const httpStatus =
           joinRes.error === "FULL" || joinRes.error === "CONFLICT"
@@ -454,8 +459,10 @@ export const lobbyService = {
 
       const existingIdx = lobby.players.findIndex((p) => p.id === player.id);
       if (existingIdx >= 0) {
+        console.log("[PLAYER_SESSION_REUSED]", { code: code.toUpperCase(), playerId, name: name.trim(), slot: assignedSlot });
         lobby.players[existingIdx] = player;
       } else {
+        console.log("[JOIN_ACCEPTED]", { code: code.toUpperCase(), playerId, name: name.trim(), slot: assignedSlot, totalPlayers: lobby.players.length + 1 });
         lobby.players.push(player);
       }
 
@@ -1206,6 +1213,13 @@ export const gameService = {
         player.puzzle?.version ?? lobby.version,
       );
       if (!claimed) {
+        // Idempotent: return current state for duplicate
+        console.log("[ACTION_DUPLICATE]", {
+          actionId: actionId ?? null,
+          gameId: lobby.currentGameId ?? null,
+          playerId,
+          actionType: "SWAP",
+        });
         return {
           gameId: lobby.currentGameId ?? null,
           actionId: actionId ?? null,
@@ -1218,18 +1232,48 @@ export const gameService = {
         };
       }
       if (lobby.status !== GameState.PUZZLE) {
+        console.log("[ACTION_REJECTED_INACTIVE]", {
+          actionId: actionId ?? null,
+          gameId: lobby.currentGameId ?? null,
+          playerId,
+          actionType: "SWAP",
+          lobbyStatus: lobby.status,
+          reason: "PUZZLE_NOT_ACTIVE",
+        });
         throw new GameError("INVALID_STATE", "The puzzle is not active.", 409);
       }
       if (player.eliminated || player.puzzle?.eliminated) {
+        console.log("[ACTION_REJECTED_INACTIVE]", {
+          actionId: actionId ?? null,
+          gameId: lobby.currentGameId ?? null,
+          playerId,
+          actionType: "SWAP",
+          reason: "PLAYER_ELIMINATED",
+        });
         throw new GameError("FORBIDDEN", "You have been eliminated.", 403);
       }
       if (lobby.puzzleEndsAt && Date.now() > lobby.puzzleEndsAt) {
         player.eliminated = true;
         if (player.puzzle) player.puzzle.eliminated = true;
+        console.log("[ACTION_REJECTED_INACTIVE]", {
+          actionId: actionId ?? null,
+          gameId: lobby.currentGameId ?? null,
+          playerId,
+          actionType: "SWAP",
+          reason: "TIME_EXPIRED",
+        });
         throw new GameError("TIME_EXPIRED", "3-minute time limit has expired. You are eliminated.", 400);
       }
       const puzzle = player.puzzle;
       if (!puzzle || puzzle.completed) {
+        console.log("[ACTION_PLAYER_STATE_MISSING]", {
+          actionId: actionId ?? null,
+          gameId: lobby.currentGameId ?? null,
+          playerId,
+          actionType: "SWAP",
+          hasPuzzle: !!puzzle,
+          completed: puzzle?.completed ?? false,
+        });
         throw new GameError("INVALID_STATE", "No active puzzle for player.", 409);
       }
       const total = lobby.gridCols * lobby.gridRows;
@@ -1257,12 +1301,14 @@ export const gameService = {
       lobby.version = (lobby.version || 0) + 1;
       puzzle.version = lobby.version;
 
-      console.log("[ACTION_ACCEPTED]", {
+      console.log("[ACTION_APPLIED]", {
         actionId: actionId ?? null,
         gameId,
         playerId,
         actionType: "SWAP",
         version: puzzle.version,
+        from,
+        to,
       });
 
       const before = [...puzzle.board];

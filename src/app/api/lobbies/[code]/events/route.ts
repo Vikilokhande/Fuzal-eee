@@ -89,6 +89,8 @@ export async function GET(
   let closed = false;
   let cleanup = () => {};
 
+  console.log("[SSE_CONNECTED]", { code: upperCode, kind, playerId: kind === "player" ? playerId : null });
+
   const stream = new ReadableStream({
     async start(controller) {
       const sendFrame = (frame: string, eventId?: number, eventName?: string) => {
@@ -163,6 +165,15 @@ export async function GET(
           controller.close();
         } catch {
           /* noop */
+        }
+        console.log("[SSE_DISCONNECTED]", { code: upperCode, kind, playerId: kind === "player" ? playerId : null });
+        // Notify the service layer so the player's connection status is updated
+        // after the configured grace window (handles both genuine disconnects and
+        // temporary SSE rotations - the grace timer absorbs rotation reconnects).
+        if (kind === "player" && playerId) {
+          void lobbyService.handleDisconnect(upperCode, playerId).catch((err) => {
+            console.warn("[SSE_DISCONNECT_WARN]", { code: upperCode, playerId, error: String(err?.message ?? err) });
+          });
         }
       };
 

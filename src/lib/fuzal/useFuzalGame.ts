@@ -141,8 +141,18 @@ function actionErrorMeta(error: unknown): { reason: string; status: number | nul
 
 function isRetryableActionError(error: unknown): boolean {
   const status = (error as ApiError).status;
-  if (typeof status !== "number") return true;
-  return status === 408 || status === 425 || status === 429 || status >= 500;
+  // Definitive server/state rejections — NEVER retry these:
+  // 400 Bad Request, 403 Forbidden, 404 Not Found,
+  // 409 Conflict / INVALID_STATE, 410 Gone / SESSION_EXPIRED
+  if (typeof status === "number") {
+    if (status === 400 || status === 403 || status === 404 || status === 409 || status === 410) {
+      return false;
+    }
+    // Transient conditions that can be retried
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+  // No HTTP status — pure network error. Retry (caller enforces max 3 attempts).
+  return true;
 }
 
 async function postActionUntilSettled(
@@ -150,7 +160,9 @@ async function postActionUntilSettled(
   body: Record<string, unknown>,
   shouldContinue: () => boolean,
   onRetryableFailure: (error: unknown, attempt: number) => void,
+  maxNetworkRetries = 3,
 ): Promise<Record<string, unknown> | boolean | null> {
+  let networkAttempts = 0;
   for (let attempt = 1; ; attempt += 1) {
     if (!shouldContinue()) return null;
     try {
@@ -159,6 +171,11 @@ async function postActionUntilSettled(
     } catch (error) {
       if (!isRetryableActionError(error)) throw error;
       if (!shouldContinue()) return null;
+      // Network errors: cap at maxNetworkRetries to prevent infinite storm
+      if (typeof (error as ApiError).status !== "number") {
+        networkAttempts += 1;
+        if (networkAttempts >= maxNetworkRetries) throw error;
+      }
       onRetryableFailure(error, attempt);
       await delay(Math.min(250 * 2 ** Math.min(attempt - 1, 5), 8000));
     }
@@ -1114,6 +1131,7 @@ export function useFuzalGame(opts: UseOpts) {
   const swap = useCallback(
     async (from: number, to: number) => {
       const prev = stateRef.current;
+      // Guard 1: Basic preconditions
       if (
         !opts.playerId ||
         !opts.playerToken ||
@@ -1123,6 +1141,33 @@ export function useFuzalGame(opts: UseOpts) {
         prev.puzzle.completed ||
         swapInFlightRef.current
       ) {
+        return;
+      }
+
+      // Guard 2: Server-authoritative phase check — read from stateRef for freshness
+      // This is the primary defense against submitting SWAP after timer expiry.
+      if (prev.status !== GameState.PUZZLE) {
+        logClientDiagnostic("SWAP_CANCELLED_INACTIVE", {
+          actionId: null,
+          gameId: prev.currentGameId,
+          playerId: opts.playerId,
+          reason: "STATUS_NOT_PUZZLE",
+          status: prev.status,
+        }, "warn");
+        return;
+      }
+
+      // Guard 3: Timer check — use puzzleEndsAt for accuracy
+      const nowMs = Date.now();
+      if (prev.puzzleEndsAt && nowMs >= prev.puzzleEndsAt) {
+        logClientDiagnostic("SWAP_CANCELLED_INACTIVE", {
+          actionId: null,
+          gameId: prev.currentGameId,
+          playerId: opts.playerId,
+          reason: "TIMER_EXPIRED",
+          puzzleEndsAt: prev.puzzleEndsAt,
+          nowMs,
+        }, "warn");
         return;
       }
 
@@ -1192,9 +1237,20 @@ export function useFuzalGame(opts: UseOpts) {
         const accepted = await postActionUntilSettled(
           opts.code,
           actionBody,
-          () =>
-            swapInFlightRef.current === actionId &&
-            stateRef.current?.currentGameId === prev.currentGameId,
+          () => {
+            const cur = stateRef.current;
+            // Stop retrying if:
+            // - action is no longer in flight (was cancelled by another path)
+            // - game has changed
+            // - phase is no longer PUZZLE (timer expired, game finished, etc.)
+            // - timer has expired
+            if (swapInFlightRef.current !== actionId) return false;
+            if (!cur) return false;
+            if (cur.currentGameId !== prev.currentGameId) return false;
+            if (cur.status !== GameState.PUZZLE) return false;
+            if (cur.puzzleEndsAt && Date.now() >= cur.puzzleEndsAt) return false;
+            return true;
+          },
           (error, attempt) => {
             logClientDiagnostic(
               "ACTION_REJECTED",
@@ -1237,14 +1293,22 @@ export function useFuzalGame(opts: UseOpts) {
           swapInFlightRef.current = null;
         }
       } catch (e) {
+        const errMeta = actionErrorMeta(e);
+        const isInvalidState =
+          errMeta.status === 409 &&
+          (errMeta.code === "INVALID_STATE" || errMeta.code === "TIME_EXPIRED");
+
         logClientDiagnostic(
-          "SWAP_RESPONSE",
+          isInvalidState ? "ACTION_REJECTED_INACTIVE" : "SWAP_RESPONSE",
           {
             actionId,
             gameId: prev.currentGameId,
             playerId: opts.playerId,
+            from,
+            to,
             success: false,
-            ...actionErrorMeta(e),
+            clientStatus: stateRef.current?.status ?? null,
+            ...errMeta,
           },
           "warn",
         );
@@ -1254,10 +1318,28 @@ export function useFuzalGame(opts: UseOpts) {
             actionId,
             gameId: prev.currentGameId,
             retryable: false,
-            ...actionErrorMeta(e),
+            ...errMeta,
           },
           "warn",
         );
+
+        // 409 INVALID_STATE: puzzle is no longer active.
+        // Roll back optimistic board, clear in-flight state, do NOT show error toast.
+        // The SSE stream will deliver the authoritative state.
+        if (isInvalidState) {
+          if (swapInFlightRef.current === actionId) {
+            swapInFlightRef.current = null;
+          }
+          const current = stateRef.current;
+          if (current && current.currentGameId === prev.currentGameId) {
+            // Roll back to the pre-swap board
+            commitState({ ...current, puzzle: current.puzzle ?? previousPuzzle });
+          }
+          // No toast — this is expected behavior when the timer expires
+          return;
+        }
+
+        // All other non-retryable errors: roll back optimistic board and show toast
         const current = stateRef.current;
         if (
           swapInFlightRef.current === actionId &&
