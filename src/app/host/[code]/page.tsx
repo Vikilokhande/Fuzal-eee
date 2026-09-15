@@ -16,6 +16,7 @@ import { PlayersTab } from "@/components/host/PlayersTab";
 import { HistoryTab } from "@/components/host/HistoryTab";
 import { PuzzleLibraryTab } from "@/components/host/PuzzleLibraryTab";
 import { ConfigTab } from "@/components/host/ConfigTab";
+import type { PuzzleImageDef } from "@/lib/game/types";
 
 function HostPageContent() {
   const params = useParams<{ code: string }>();
@@ -55,6 +56,8 @@ function HostPageContent() {
 
   const game = useFuzalGame(token ? { code, kind: "host", hostToken: token } : { code, kind: "host" });
   const { state, connState, toast, memorySeconds, puzzleElapsedMs, puzzleRemainingMs, actions } = game;
+
+  const [selectedPuzzle, setSelectedPuzzle] = useState<PuzzleImageDef | null>(null);
 
   async function newLobby() {
     const lobby = await createLobby({
@@ -207,7 +210,10 @@ function HostPageContent() {
                 memorySeconds={memorySeconds}
                 result={state.result}
                 maxPlayers={state.maxPlayers}
-                onStartGame={actions.startGame}
+                selectedPuzzle={selectedPuzzle}
+                onSelectPuzzle={() => setActiveTab("puzzles")}
+                onClearSelectedPuzzle={() => setSelectedPuzzle(null)}
+                onStartGame={() => actions.startGame(selectedPuzzle?.id)}
                 onPlayAgain={actions.playAgain}
                 onBackToLobby={actions.backToLobby}
                 onNewLobby={newLobby}
@@ -228,7 +234,12 @@ function HostPageContent() {
             )}
 
             {activeTab === "puzzles" && (
-              <PuzzleLibraryTab />
+              <PuzzleLibraryTab
+                onUsePuzzle={(puzzle) => {
+                  setSelectedPuzzle(puzzle);
+                  setActiveTab("live");
+                }}
+              />
             )}
 
             {activeTab === "config" && (

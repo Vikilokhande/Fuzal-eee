@@ -31,6 +31,9 @@ export function LiveGameTab({
   memorySeconds,
   result,
   maxPlayers = 8,
+  selectedPuzzle,
+  onSelectPuzzle,
+  onClearSelectedPuzzle,
   onStartGame,
   onPlayAgain,
   onBackToLobby,
@@ -51,6 +54,9 @@ export function LiveGameTab({
   memorySeconds?: number;
   result?: any;
   maxPlayers?: number;
+  selectedPuzzle?: { id: string; name: string; url: string } | null;
+  onSelectPuzzle?: () => void;
+  onClearSelectedPuzzle?: () => void;
   onStartGame: () => void;
   onPlayAgain?: () => void;
   onBackToLobby?: () => void;
@@ -260,15 +266,65 @@ export function LiveGameTab({
               Players scan the QR code with their mobile device. The arena supports up to{" "}
               <strong className="text-cyan-300">{maxPlayers} players</strong> in this battle.
             </p>
-            <div className="pt-2">
+
+            {/* Selected Puzzle Indicator & Selector */}
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-black/40 border border-white/10 text-xs my-1">
+              <div className="flex items-center gap-2.5 min-w-0">
+                {selectedPuzzle ? (
+                  <>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={selectedPuzzle.url}
+                      alt={selectedPuzzle.name}
+                      className="h-9 w-9 rounded-lg object-cover border border-cyan-400/40 flex-shrink-0"
+                    />
+                    <div className="min-w-0 text-left">
+                      <span className="text-[10px] uppercase font-mono text-cyan-400 font-bold block">Selected Puzzle</span>
+                      <span className="text-white font-bold truncate block">{selectedPuzzle.name}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2 text-left">
+                    <span className="text-base">🎲</span>
+                    <div>
+                      <span className="text-[10px] uppercase font-mono text-indigo-200/60 font-bold block">Puzzle Selection</span>
+                      <span className="text-indigo-200 font-medium">Random / Persistent Ready</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                {selectedPuzzle && onClearSelectedPuzzle && (
+                  <button
+                    type="button"
+                    onClick={onClearSelectedPuzzle}
+                    className="text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-indigo-200"
+                    title="Clear Selection"
+                  >
+                    ✕
+                  </button>
+                )}
+                {onSelectPuzzle && (
+                  <button
+                    type="button"
+                    onClick={onSelectPuzzle}
+                    className="btn-secondary px-2.5 py-1 text-xs font-bold text-cyan-300 border-cyan-400/30"
+                  >
+                    {selectedPuzzle ? "Change" : "Choose"}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-1">
               <button
                 type="button"
-                onClick={onStartGame}
-                disabled={!canStart}
+                onClick={handleStartGame}
+                disabled={!canStart || isStarting}
                 className="btn-primary w-full py-3.5 text-sm font-black flex items-center justify-center gap-2 shadow-[0_0_25px_rgba(34,211,238,0.4)]"
               >
                 <span>🚀</span>
-                <span>{canStart ? "LAUNCH ARENA MATCH" : "WAITING FOR PLAYERS (MIN 1)"}</span>
+                <span>{canStart ? (isStarting ? "LAUNCHING..." : "LAUNCH ARENA MATCH") : "WAITING FOR PLAYERS (MIN 1)"}</span>
               </button>
             </div>
           </div>

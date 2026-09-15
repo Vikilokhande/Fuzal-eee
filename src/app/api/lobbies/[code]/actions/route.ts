@@ -45,7 +45,7 @@ export async function POST(
 
     switch (action.data.type) {
       case "START_GAME":
-        await gameService.startGame(code, action.data.token);
+        await gameService.startGame(code, action.data.token, action.data.imageId);
         break;
       case "BEGIN_PUZZLE": {
         await gameService.beginPuzzle(code, false);

@@ -1,5 +1,5 @@
 import { lobbyRepo } from "@/lib/game/repo";
-import { GameState } from "@/lib/game/types";
+import { GameState, type ImageMeta } from "@/lib/game/types";
 import { safeEqualToken } from "@/lib/game/auth";
 import { errorResponse } from "@/lib/game/http";
 import { getEmbeddedPieceBuffer } from "@/lib/game/puzzlePiecesData";
@@ -29,12 +29,13 @@ interface AuthEntry {
   pieceCount: number;
   cols: number;
   rows: number;
+  source: "uploaded" | "builtin";
   expiresAt: number;
 }
 const authCache = new Map<string, AuthEntry>();
 
 /**
- * In-memory cache of pre-generated WebP buffers: `${slug}:${cols}x${rows}:${pieceId}`
+ * In-memory cache of pre-generated WebP buffers: `${source}:${slug}:${cols}x${rows}:${pieceId}`
  */
 const pieceBufferCache = new Map<string, Buffer>();
 
@@ -70,8 +71,12 @@ export async function GET(
     let total = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.pieceCount : 9;
     let cols = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.cols : 3;
     let rows = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.rows : 3;
+    let source: "uploaded" | "builtin" =
+      cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.source : "builtin";
 
     if (!slug) {
+      let activeImage: ImageMeta | null = null;
+
       // Check in-process lobby first (0ms)
       const localLobby = (lobbyRepo as any).processLobbies?.get(code);
       if (
@@ -87,8 +92,8 @@ export async function GET(
             { status: 403 },
           );
         }
-        const img = localLobby.memory?.image;
-        slug = img?.slug ?? img?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
+        activeImage = localLobby.memory?.image ?? null;
+        slug = activeImage?.slug ?? activeImage?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
         gameId = localLobby.gameId ?? localLobby.id ?? null;
         total = pieceCountFromLobby(localLobby);
         cols = Number(localLobby.gridCols ?? 3);
@@ -118,14 +123,14 @@ export async function GET(
             { status: 403 },
           );
         }
-        const image = lobby.memory?.image;
-        if (!image) {
+        activeImage = lobby.memory?.image ?? null;
+        if (!activeImage) {
           return Response.json(
             { error: "INVALID_STATE", message: "No active puzzle image." },
             { status: 409 },
           );
         }
-        slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        slug = activeImage.slug ?? activeImage.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         gameId = lobby.currentGameId ?? (lobby as any).gameId ?? lobby.id ?? null;
         total = pieceCountFromLobby(lobby);
         cols = Number(lobby.gridCols ?? 3);
@@ -133,12 +138,18 @@ export async function GET(
       }
 
       if (slug) {
+        const isUploaded =
+          activeImage?.source === "uploaded" ||
+          Boolean(activeImage?.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeImage.id));
+        source = isUploaded ? "uploaded" : "builtin";
+
         authCache.set(authKey, {
           gameId,
           slug,
           pieceCount: total,
           cols,
           rows,
+          source,
           expiresAt: Date.now() + 120_000,
         });
       }
@@ -165,13 +176,14 @@ export async function GET(
         lobbyCode: code,
         gameId,
         pieceId: piece,
+        source,
         gridSize: cols,
         pieceCount: total,
       })}`,
     );
 
-    // 4. Check in-memory buffer cache (0ms)
-    const cacheKey = `${slug}:${cols}x${rows}:${piece}`;
+    // 4. Check in-memory buffer cache (0ms) with source namespace
+    const cacheKey = `${source}:${slug}:${cols}x${rows}:${piece}`;
     const memBuf = pieceBufferCache.get(cacheKey);
     if (memBuf) {
       return new Response(memBuf as unknown as BodyInit, {
@@ -183,17 +195,25 @@ export async function GET(
       });
     }
 
-    // 5. Check pre-generated embedded bundle (0ms for 2x2, 3x3, 4x4)
-    const embeddedBuf = getEmbeddedPieceBuffer(slug, cols, piece);
-    if (embeddedBuf) {
-      pieceBufferCache.set(cacheKey, embeddedBuf);
-      return new Response(embeddedBuf as unknown as BodyInit, {
-        status: 200,
-        headers: {
-          "Content-Type": "image/webp",
-          "Cache-Control": "public, max-age=86400, immutable",
-        },
-      });
+    // 5. For BUILT-IN puzzles ONLY: check pre-generated embedded bundle (0ms for 2x2, 3x3, 4x4)
+    if (source === "builtin") {
+      const embeddedBuf = getEmbeddedPieceBuffer(slug, cols, piece);
+      if (embeddedBuf) {
+        pieceBufferCache.set(cacheKey, embeddedBuf);
+        console.log("[PUZZLE_IMAGE_SUCCESS]", {
+          pieceId: piece,
+          slug,
+          source,
+          origin: "embedded",
+        });
+        return new Response(embeddedBuf as unknown as BodyInit, {
+          status: 200,
+          headers: {
+            "Content-Type": "image/webp",
+            "Cache-Control": "public, max-age=86400, immutable",
+          },
+        });
+      }
     }
 
     // 6. Deliver pre-generated WebP from Supabase Storage
@@ -258,10 +278,11 @@ export async function GET(
       const durationMs = Math.round(performance.now() - start);
       pieceBufferCache.set(cacheKey, pieceBuf);
 
-      // Structured logging: [PIECE_STORAGE_SUCCESS]
       console.log(
-        `[PIECE_STORAGE_SUCCESS] ${JSON.stringify({
+        `[PUZZLE_IMAGE_SUCCESS] ${JSON.stringify({
           pieceId: piece,
+          slug,
+          source,
           storagePath: resolvedPath,
           durationMs,
           contentType: "image/webp",
@@ -283,11 +304,20 @@ export async function GET(
     const errorMessage = lastError?.message || "Piece asset not found in storage";
     const errorCode = lastError?.status || lastError?.code || "NOT_FOUND";
 
-    // Structured logging: [PIECE_STORAGE_ERROR]
     console.error(
-      `[PIECE_STORAGE_ERROR] ${JSON.stringify({
+      `[PUZZLE_STORAGE_OBJECT_MISSING] ${JSON.stringify({
         pieceId: piece,
-        operation: "download",
+        slug,
+        source,
+        canonicalPath: canonicalStoragePath,
+      })}`,
+    );
+
+    console.error(
+      `[PUZZLE_IMAGE_LOAD_FAILED] ${JSON.stringify({
+        pieceId: piece,
+        slug,
+        source,
         errorName,
         errorMessage,
         errorCode,

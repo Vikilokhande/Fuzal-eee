@@ -1,5 +1,5 @@
 import { lobbyRepo } from "@/lib/game/repo";
-import { GameState } from "@/lib/game/types";
+import { GameState, type ImageMeta } from "@/lib/game/types";
 import { safeEqualToken } from "@/lib/game/auth";
 import { errorResponse } from "@/lib/game/http";
 import { getEmbeddedAllPieces } from "@/lib/game/puzzlePiecesData";
@@ -19,7 +19,7 @@ function pieceCountFromLobby(lobby: any): number {
   );
 }
 
-/** In-memory cache of assembled piece dataURLs: `${slug}:${cols}x${rows}` */
+/** In-memory cache of assembled piece dataURLs: `${source}:${slug}:${cols}x${rows}` */
 const batchPiecesCache = new Map<string, Record<number, string>>();
 
 const supabaseUrl =
@@ -29,7 +29,7 @@ const supabaseUrl =
 /**
  * Fast batch pieces endpoint:
  * Returns all puzzle pieces in a single compressed JSON response.
- * Uses pre-generated WebP assets from embedded bundle or Supabase Storage (zero runtime sharp).
+ * Uses pre-generated WebP assets from embedded bundle (for builtin) or Supabase Storage (for uploaded).
  */
 export async function GET(
   req: Request,
@@ -50,6 +50,7 @@ export async function GET(
     }
 
     // 1. Verify player session and determine active puzzle image & dimensions
+    let activeImage: ImageMeta | null = null;
     let slug: string | null = null;
     let total = 9;
     let cols = 3;
@@ -70,8 +71,8 @@ export async function GET(
           { status: 403 },
         );
       }
-      const img = localLobby.memory?.image;
-      slug = img?.slug ?? img?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
+      activeImage = localLobby.memory?.image ?? null;
+      slug = activeImage?.slug ?? activeImage?.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
       total = pieceCountFromLobby(localLobby);
       cols = Number(localLobby.gridCols ?? 3);
       rows = Number(localLobby.gridRows ?? 3);
@@ -100,14 +101,14 @@ export async function GET(
           { status: 403 },
         );
       }
-      const image = lobby.memory?.image;
-      if (!image) {
+      activeImage = lobby.memory?.image ?? null;
+      if (!activeImage) {
         return Response.json(
           { error: "INVALID_STATE", message: "No active puzzle image." },
           { status: 409 },
         );
       }
-      slug = image.slug ?? image.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      slug = activeImage.slug ?? activeImage.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       total = pieceCountFromLobby(lobby);
       cols = Number(lobby.gridCols ?? 3);
       rows = Number(lobby.gridRows ?? 3);
@@ -120,10 +121,31 @@ export async function GET(
       );
     }
 
-    // 2. Check in-memory batch cache
-    const cacheKey = `${slug}:${cols}x${rows}`;
+    const isUploaded =
+      activeImage?.source === "uploaded" ||
+      Boolean(activeImage?.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeImage.id));
+    const source = isUploaded ? "uploaded" : "builtin";
+
+    console.log("[PUZZLE_IMAGE_REQUEST]", {
+      code,
+      playerId,
+      slug,
+      source,
+      grid: `${cols}x${rows}`,
+      pieceCount: total,
+    });
+
+    // 2. Check in-memory batch cache with source namespace
+    const cacheKey = `${source}:${slug}:${cols}x${rows}`;
     const cachedBatch = batchPiecesCache.get(cacheKey);
     if (cachedBatch && Object.keys(cachedBatch).length === total) {
+      console.log("[PUZZLE_IMAGE_SUCCESS]", {
+        slug,
+        source,
+        cached: true,
+        grid: `${cols}x${rows}`,
+        piecesCount: total,
+      });
       return Response.json(
         { ok: true, slug, pieceCount: total, gridCols: cols, gridRows: rows, pieces: cachedBatch },
         {
@@ -133,14 +155,19 @@ export async function GET(
       );
     }
 
-    // 3. Check pre-generated embedded bundle (0ms for 2x2, 3x3, 4x4)
-    let pieces: Record<number, string> | null = getEmbeddedAllPieces(slug, cols);
+    let pieces: Record<number, string> | null = null;
 
-    // 4. For larger grids (5x5 through 8x8) or missing: fetch pre-generated WebP tiles from Supabase Storage
+    // 3. For built-in puzzles ONLY, check pre-generated embedded bundle (0ms for 2x2, 3x3, 4x4)
+    if (!isUploaded) {
+      pieces = getEmbeddedAllPieces(slug, cols);
+    }
+
+    // 4. For uploaded puzzles OR missing/large built-in grids: fetch pre-generated WebP tiles from Supabase Storage
     if (!pieces || Object.keys(pieces).length < total) {
       try {
         const fetchedPieces: Record<number, string> = {};
         const fetchPromises: Promise<void>[] = [];
+        let missingCount = 0;
 
         for (let pieceId = 0; pieceId < total; pieceId++) {
           const pieceNumStr = String(pieceId).padStart(2, "0");
@@ -191,6 +218,15 @@ export async function GET(
 
               if (buf) {
                 fetchedPieces[pieceId] = `data:image/webp;base64,${buf.toString("base64")}`;
+              } else {
+                missingCount++;
+                console.error("[PUZZLE_STORAGE_OBJECT_MISSING]", {
+                  slug,
+                  source,
+                  grid: `${cols}x${rows}`,
+                  pieceId,
+                  canonicalPath,
+                });
               }
             })(),
           );
@@ -201,6 +237,22 @@ export async function GET(
         if (Object.keys(fetchedPieces).length === total) {
           pieces = fetchedPieces;
           batchPiecesCache.set(cacheKey, fetchedPieces);
+          console.log("[PUZZLE_IMAGE_SUCCESS]", {
+            slug,
+            source,
+            cached: false,
+            grid: `${cols}x${rows}`,
+            piecesCount: total,
+          });
+        } else {
+          console.error("[PUZZLE_IMAGE_LOAD_FAILED]", {
+            slug,
+            source,
+            grid: `${cols}x${rows}`,
+            received: Object.keys(fetchedPieces).length,
+            expected: total,
+            missingCount,
+          });
         }
       } catch (err) {
         console.error(`[BATCH_STORAGE_FETCH_ERR] slug=${slug}, grid=${cols}x${rows}:`, err);

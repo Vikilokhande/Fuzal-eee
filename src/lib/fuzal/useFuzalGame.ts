@@ -1092,11 +1092,11 @@ export function useFuzalGame(opts: UseOpts) {
 
   const hostActionInFlightRef = useRef(false);
 
-  const startGame = useCallback(async () => {
+  const startGame = useCallback(async (imageId?: string) => {
     if (!opts.hostToken || hostActionInFlightRef.current) return;
     hostActionInFlightRef.current = true;
     try {
-      await postAction(opts.code, { type: "START_GAME", token: opts.hostToken });
+      await postAction(opts.code, { type: "START_GAME", token: opts.hostToken, imageId });
     } catch (e) {
       showToast((e as Error).message);
     } finally {

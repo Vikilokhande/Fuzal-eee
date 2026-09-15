@@ -237,6 +237,93 @@ function memoryBlock(lobby: Lobby, now: number) {
   };
 }
 
+const supabaseStorageUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ??
+  "https://dewdcxssvkvbgyyenmmu.supabase.co";
+
+async function resolvePuzzleImage(
+  imageId?: string,
+  usedImageIds: string[] = [],
+  gridCols = 3,
+  gridRows = 3,
+): Promise<ImageMeta> {
+  if (imageId) {
+    // Priority 1: Explicit host-selected puzzle by exact DB UUID
+    if (!isSupabaseConfigured()) {
+      const dyn = imageService.get(imageId);
+      if (dyn) {
+        return {
+          ...dyn,
+          source: dyn.source ?? "uploaded",
+        };
+      }
+      throw new GameError("NOT_FOUND", `Puzzle ${imageId} not found.`, 404);
+    }
+
+    const { data: dbRow, error: dbErr } = await supabaseAdmin
+      .from("puzzle_images")
+      .select("id, name, storage_path, active")
+      .eq("id", imageId)
+      .maybeSingle();
+
+    if (dbErr || !dbRow) {
+      console.error("[PUZZLE_IMAGE_LOAD_FAILED]", { imageId, error: dbErr?.message });
+      throw new GameError("NOT_FOUND", "Selected puzzle not found.", 404);
+    }
+
+    if (!dbRow.active) {
+      console.error("[PUZZLE_NOT_READY]", { imageId, name: dbRow.name });
+      throw new GameError("BAD_REQUEST", "Selected puzzle is not active or ready.", 400);
+    }
+
+    const slug = dbRow.storage_path;
+    const canonicalUrl = `${supabaseStorageUrl}/storage/v1/object/public/puzzle-images/${slug}/original.webp`;
+
+    return {
+      id: dbRow.id,
+      name: dbRow.name,
+      slug,
+      url: canonicalUrl,
+      source: "uploaded",
+    };
+  }
+
+  // Priority 2: Random READY persistent puzzle from Supabase
+  if (isSupabaseConfigured()) {
+    try {
+      const { data: activeRows, error } = await supabaseAdmin
+        .from("puzzle_images")
+        .select("id, name, storage_path, active")
+        .eq("active", true);
+
+      if (!error && activeRows && activeRows.length > 0) {
+        const unused = activeRows.filter((r) => !usedImageIds.includes(r.id));
+        const pool = unused.length > 0 ? unused : activeRows;
+        const picked = pool[Math.floor(Math.random() * pool.length)];
+        const slug = picked.storage_path;
+        const canonicalUrl = `${supabaseStorageUrl}/storage/v1/object/public/puzzle-images/${slug}/original.webp`;
+
+        return {
+          id: picked.id,
+          name: picked.name,
+          slug,
+          url: canonicalUrl,
+          source: "uploaded",
+        };
+      }
+    } catch (err) {
+      console.warn("[PERSISTENT_PUZZLE_RANDOM_QUERY_FAILED]", err);
+    }
+  }
+
+  // Priority 3: Legacy built-in fallback
+  const fallback = imageService.getRandomImage(usedImageIds);
+  return {
+    ...fallback,
+    source: "builtin",
+  };
+}
+
 async function createGameRoundRecord(
   code: string,
   lobby: Lobby,
@@ -252,11 +339,25 @@ async function createGameRoundRecord(
       .eq("code", code.toUpperCase())
       .maybeSingle();
 
-    const { data: imgRow } = await supabaseAdmin
-      .from("puzzle_images")
-      .select("id")
-      .eq("name", image.name)
-      .maybeSingle();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(image.id);
+    let imgRow: { id: string } | null = null;
+    if (isUuid) {
+      const { data } = await supabaseAdmin
+        .from("puzzle_images")
+        .select("id")
+        .eq("id", image.id)
+        .maybeSingle();
+      imgRow = data;
+    }
+    if (!imgRow && (image.source === "builtin" || !image.source)) {
+      // Explicit legacy compatibility path for built-in puzzles only
+      const { data } = await supabaseAdmin
+        .from("puzzle_images")
+        .select("id")
+        .eq("name", image.name)
+        .maybeSingle();
+      imgRow = data;
+    }
 
     if (!lobbyRow || !imgRow) return null;
 
@@ -808,7 +909,7 @@ export const gameService = {
   },
 
   /** LOBBY → MEMORY */
-  async startGame(code: string, hostToken: string): Promise<void> {
+  async startGame(code: string, hostToken: string, imageId?: string): Promise<void> {
     const lobby = await lobbyRepo.getByCode(code);
     if (!lobby) throw new GameError("NOT_FOUND", "Lobby not found.", 404);
     await withLobbyLock(lobby, async () => {
@@ -825,7 +926,7 @@ export const gameService = {
       if (lobby.players.length === 0) {
         throw new GameError("BAD_REQUEST", "At least one player must join before starting.", 400);
       }
-      const image = imageService.getRandomImage(lobby.usedImageIds);
+      const image = await resolvePuzzleImage(imageId, lobby.usedImageIds, lobby.gridCols, lobby.gridRows);
       lobby.usedImageIds.push(image.id);
       const durationSeconds = config.memorySeconds;
       const startedAt = Date.now();
@@ -846,6 +947,24 @@ export const gameService = {
         "START_GAME",
       );
       if (gameRowId) lobby.currentGameId = gameRowId;
+
+      console.log("[PUZZLE_SELECTED]", {
+        lobbyCode: code.toUpperCase(),
+        gameId: lobby.currentGameId ?? null,
+        puzzleId: image.id,
+        slug: image.slug ?? null,
+        source: image.source ?? "uploaded",
+        gridSize: `${lobby.gridCols}x${lobby.gridRows}`,
+      });
+
+      console.log("[GAME_PUZZLE_RESOLVED]", {
+        lobbyCode: code.toUpperCase(),
+        gameId: lobby.currentGameId ?? null,
+        puzzleId: image.id,
+        slug: image.slug ?? null,
+        source: image.source,
+        url: image.url,
+      });
 
       await lobbyRepo.put(lobby);
 
@@ -939,11 +1058,11 @@ export const gameService = {
       }
       if (lobby.status === GameState.FINISHED) return; // cannot move back to PUZZLE if finished
       if (lobby.status === GameState.LOBBY) {
-        console.log("[BEGIN_PUZZLE_IGNORED_LOBBY]", {
+        console.log("[BEGIN_PUZZLE_REJECTED_LOBBY]", {
           gameId: lobby.currentGameId ?? null,
           status: lobby.status,
         });
-        return; // Idempotent: cannot transition to PUZZLE directly from LOBBY
+        throw new GameError("INVALID_STATE", "Cannot transition to PUZZLE directly from LOBBY.", 409);
       }
 
       const now = Date.now();
@@ -1581,7 +1700,7 @@ export const gameService = {
         p.puzzle = null;
         p.eliminated = false;
       }
-      const image = imageService.getRandomImage(lobby.usedImageIds);
+      const image = await resolvePuzzleImage(undefined, lobby.usedImageIds, lobby.gridCols, lobby.gridRows);
       lobby.usedImageIds.push(image.id);
       const durationSeconds = config.memorySeconds;
       const startedAt = Date.now();

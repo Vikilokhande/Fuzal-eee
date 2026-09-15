@@ -67,6 +67,7 @@ export interface ImageMeta {
   url: string;
   name: string;
   slug?: string;
+  source?: "uploaded" | "builtin";
 }
 
 export interface MemoryPhase {
@@ -288,6 +289,8 @@ const clientActionFields = {
 
 export const startGameAction = actionBase.extend({
   type: z.literal("START_GAME"),
+  imageId: z.string().trim().min(1).optional(),
+  ...clientActionFields,
 });
 export const swapAction = actionBase.extend({
   type: z.literal("SWAP"),
